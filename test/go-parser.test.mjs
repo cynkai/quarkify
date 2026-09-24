@@ -597,3 +597,48 @@ test('func literals get their own body and multi-line literals stay whole', asyn
     }
   });
 });
+
+// `func 인사()` is valid Go. safeName() flattens both `인사` and `안녕` to the
+// same `__`, so without disambiguation their bodies would merge into one folder.
+// The assertions read bodies, not folder spellings, so they hold however
+// safeName() treats non-ASCII.
+test('non-ASCII identifiers are parsed and never merge', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnGo(workspace, [
+      'package 인사말',
+      '',
+      'type 고객 struct {',
+      '\t이름 string',
+      '\t나이 int',
+      '}',
+      '',
+      'func 인사() { alpha() }',
+      'func 안녕() { beta() }',
+      'func (c 고객) 소개() string { return gamma(c) }',
+      '',
+      'func Run() {',
+      '\tgo인사 := 1',
+      '\t_ = go인사',
+      '}',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /4\/4 \(100\.0%\)/);
+    const top = await topLevel(fileQuark);
+    assert.equal(top.filter((e) => e.startsWith('fn__')).length, 4, top.join('\n'));
+    assert.equal(top.filter((e) => e.startsWith('struct__')).length, 1, top.join('\n'));
+
+    const entries = await listRelativeEntries(fileQuark);
+    for (const call of ['alpha', 'beta', 'gamma']) {
+      const owners = entries.filter((e) => e.endsWith(`/call__${call}`));
+      assert.equal(owners.length, 1, `${call}:\n${entries.join('\n')}`);
+    }
+    const alphaFn = entries.find((e) => e.endsWith('/call__alpha')).split('/')[0];
+    assert.ok(!entries.includes(`${alphaFn}/stmt_0__expr/call__beta`), entries.join('\n'));
+    // Two non-ASCII fields are two nodes, not one.
+    assert.equal(entries.filter((e) => /^struct__[^/]+\/(field|embed)__[^/]+$/.test(e)).length, 2, entries.join('\n'));
+    // `go인사 := 1` is an assignment to an identifier, not a go statement.
+    assert.ok(entries.includes('fn__Run/stmt_0__expr'), entries.join('\n'));
+  });
+});

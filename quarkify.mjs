@@ -1263,6 +1263,12 @@ function annotateGeneric(text, dir) {
 // single `type ( … )` / `var ( … )` statement declares several symbols. So Go
 // gets a lexer mask and its own declaration walk.
 
+// Go identifiers are Unicode (`func 인사()` is valid Go), and a keyword ends
+// where a letter in any script would continue it — JavaScript's `\b` only
+// knows ASCII, so `go인사()` would read as a `go` statement.
+const GO_ID = String.raw`[\p{L}_][\p{L}\p{N}_]*`;
+const GO_END = String.raw`(?![\p{L}\p{N}_])`;
+
 // Blank every comment, string, raw string and rune body to spaces, keeping the
 // delimiters and every newline, so offsets and line numbers still match the
 // source. Shared with the coverage audit for the same reason as
@@ -1368,7 +1374,7 @@ function goBodyRange(src) {
 
 // `(s *Stack[K, V])`, `(Stack[T])`, `(c Client)` → the receiver's base type.
 function goReceiverType(receiver) {
-  const m = String(receiver).replace(/^\s*\(|\)\s*$/g, '').match(/\*?\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*$/);
+  const m = String(receiver).replace(/^\s*\(|\)\s*$/g, '').match(new RegExp(String.raw`\*?\s*(${GO_ID})\s*(?:\[[^\]]*\])?\s*$`, 'u'));
   return m ? m[1] : '';
 }
 
@@ -1383,14 +1389,36 @@ function goFuncFolderName(signature) {
   return recv ? `${recv}__${m[2]}` : m[2];
 }
 
-// On a case-insensitive filesystem (the macOS and Windows defaults) `Execute`
-// and `execute` are one folder, and mkdir silently merges them — in Go, where
-// case is visibility, such pairs are everywhere. When names in one scope
-// differ only by case, each takes a digest of its exact spelling: a function
-// of the name alone, so the tree is the same on every OS and the coverage
-// audit can recompute it.
-function caseDistinctName(name) {
-  return `${name}__${createHash('sha1').update(name).digest('hex').slice(0, 8)}`;
+// Two different names can land in one folder, and mkdir silently merges them:
+// on a case-insensitive filesystem (the macOS and Windows defaults) `Execute`
+// and `execute` are one folder — in Go, where case is visibility, such pairs
+// are everywhere — and safeName() flattens `인사` and `안녕` to the same `__`.
+// Each colliding name then takes a digest of its exact spelling: a function of
+// the name alone, so the tree is the same on every OS and the coverage audit
+// can recompute it.
+function distinctFolderName(name) {
+  return `${safeName(name)}__${createHash('sha1').update(name).digest('hex').slice(0, 8)}`;
+}
+
+// Folder names for one scope's `{ prefix, name }` entries, in order. Names that
+// differ but would share a folder take distinctFolderName(); an exact repeat
+// (Go allows several `func init()`, `func _()`, `var _ I = (*T)(nil)`) takes an
+// occurrence suffix instead.
+function planGoFolders(entries) {
+  const spellings = new Map();
+  for (const e of entries) {
+    const key = `${e.prefix}__${safeName(e.name)}`.toLowerCase();
+    if (!spellings.has(key)) spellings.set(key, new Set());
+    spellings.get(key).add(e.name);
+  }
+  const seen = new Map();
+  return entries.map((e) => {
+    const base = `${e.prefix}__${safeName(e.name)}`;
+    const folder = spellings.get(base.toLowerCase()).size > 1 ? `${e.prefix}__${distinctFolderName(e.name)}` : base;
+    const nth = (seen.get(folder) || 0) + 1;
+    seen.set(folder, nth);
+    return nth > 1 ? `${folder}__${nth}` : folder;
+  });
 }
 
 // Fields at the struct's own depth only: an anonymous nested struct's members
@@ -1406,10 +1434,10 @@ function parseGoStructFields(inner) {
       part = part.trim().replace(/\s*(?:`[^`]*`|"[^"]*")$/, ''); // struct tag
       if (!part) continue;
       let m;
-      if ((m = part.match(/^([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+(\S[\s\S]*)$/))) {
+      if ((m = part.match(new RegExp(String.raw`^(${GO_ID}(?:\s*,\s*${GO_ID})*)\s+(\S[\s\S]*)$`, 'u')))) {
         const type = m[2].replace(/\s*\{\s*$/, '').trim();
         for (const name of m[1].split(',')) fields.push({ name: name.trim(), type });
-      } else if ((m = part.match(/^\*?(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)(?:\[[\s\S]*\])?$/))) {
+      } else if ((m = part.match(new RegExp(String.raw`^\*?(?:${GO_ID}\.)?(${GO_ID})(?:\[[\s\S]*\])?$`, 'u')))) {
         fields.push({ name: m[1], type: part, embedded: true });
       }
     }
@@ -1429,8 +1457,8 @@ function parseGoInterfaceMembers(inner) {
     for (let part of line.split(';')) {
       part = part.trim();
       let m;
-      if ((m = part.match(/^([A-Za-z_]\w*)\s*\(/))) members.push({ kind: 'method', name: m[1] });
-      else if (/^\*?[A-Za-z_][\w.]*(?:\[[\s\S]*\])?$/.test(part)) members.push({ kind: 'embed', name: part });
+      if ((m = part.match(new RegExp(String.raw`^(${GO_ID})\s*\(`, 'u')))) members.push({ kind: 'method', name: m[1] });
+      else if (new RegExp(String.raw`^\*?${GO_ID}(?:\.${GO_ID})?(?:\[[\s\S]*\])?$`, 'u').test(part)) members.push({ kind: 'embed', name: part });
     }
   }
   return members;
@@ -1439,7 +1467,7 @@ function parseGoInterfaceMembers(inner) {
 // `[T any]`, `[K comparable, V any]` are type parameters; `[4]int`, `[N]T` are
 // array types. Returns how many leading characters the parameter list spans.
 function goTypeParamsLength(rest) {
-  if (!/^\[\s*[A-Za-z_]\w*\s*(?:,|\s[^\]\s])/.test(rest)) return 0;
+  if (!new RegExp(String.raw`^\[\s*${GO_ID}\s*(?:,|\s[^\]\s])`, 'u').test(rest)) return 0;
   let depth = 0;
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === '[') depth++;
@@ -1466,11 +1494,12 @@ function goMatchBrace(src, open) {
 // for Python and Ruby, plus `clauses`: the header parts (`init`, `cond`,
 // `range`, `value`, …) that become `<part>___<text>` folders. It reads masked
 // source only, so literals and comments cannot move a boundary.
-const GO_STMT_KEYWORD = /(if|for|switch|select|case|default)\b/y;
-const GO_ELSE = /[ \t]*else\b\s*/y;
-const GO_LABEL = /([A-Za-z_]\w*)[ \t]*:(?!=)/y;
+const GO_STMT_KEYWORD = new RegExp(String.raw`(if|for|switch|select|case|default)${GO_END}`, 'uy');
+const GO_ELSE = new RegExp(String.raw`[ \t]*else${GO_END}\s*`, 'uy');
+const GO_LABEL = new RegExp(String.raw`(${GO_ID})[ \t]*:(?!=)`, 'uy');
 // What may follow the `}` that closes a block: the statement is over.
-const GO_BLOCK_END = /[ \t]*(?:$|[\n;}]|else\b)/y;
+const GO_BLOCK_END = new RegExp(String.raw`[ \t]*(?:$|[\n;}]|else${GO_END})`, 'uy');
+const GO_FUNC_KEYWORD = String.raw`(?<![\p{L}\p{N}_])func${GO_END}`;
 
 class GoBlockParser {
   constructor(src) {
@@ -1634,11 +1663,11 @@ function goExtractFuncLits(text) {
   const lits = [];
   let line = '';
   let last = 0;
-  const re = /\bfunc\s*\(/g;
+  const re = new RegExp(String.raw`${GO_FUNC_KEYWORD}\s*\(`, 'gu');
   let m;
   while ((m = re.exec(text))) {
     // `map[string]func()` and `chan func()` are func types, not literals.
-    if (/(?:\]|\bchan)\s*$/.test(text.slice(0, m.index))) continue;
+    if (/(?:\]|(?<![\p{L}\p{N}_])chan)\s*$/u.test(text.slice(0, m.index))) continue;
     let i = m.index + m[0].length - 1;
     for (let depth = 0; i < text.length; i++) {
       if (text[i] === '(') depth++;
@@ -1659,13 +1688,13 @@ function goExtractFuncLits(text) {
     last = close + 1;
     re.lastIndex = last;
   }
-  line = (line + text.slice(last)).replace(/\bfunc\b/g, '<func>').trim();
+  line = (line + text.slice(last)).replace(new RegExp(GO_FUNC_KEYWORD, 'gu'), '<func>').trim();
   return { line, lits };
 }
 
 function goSimpleNode(text) {
   const { line, lits: body } = goExtractFuncLits(text);
-  const kw = line.match(/^(return|go|defer)\b/);
+  const kw = line.match(new RegExp(String.raw`^(return|go|defer)${GO_END}`, 'u'));
   const kind = kw ? kw[1] : 'expr';
   const clauses = kind === 'return' ? [['val', line.slice(6)]] : undefined;
   return { kind, line, clauses, body };
@@ -1910,7 +1939,7 @@ class QuarkFolderEngine {
       const missing = [...file.names].filter((name) => {
         const folder = encode(name);
         return !built.has(safeName(folder)) && !built.has(folder) &&
-          !built.has(caseDistinctName(safeName(folder)));
+          !built.has(distinctFolderName(folder));
       });
       expected += file.names.size;
       matched += file.names.size - missing.length;
@@ -2112,10 +2141,10 @@ class QuarkFolderEngine {
     const masked = maskGoNonCode(text).split('\n');
 
     // Declarations are collected first and materialized last, because a
-    // folder name depends on the whole file: see caseDistinctName().
+    // folder name depends on the whole file: see planGoFolders().
     const decls = [];
     const emit = (kind, name, role, fill = () => {}) => {
-      decls.push({ kind, name, role, fill, base: `${kind}__${safeName(name)}` });
+      decls.push({ kind, name, role, fill });
     };
     // Types are code and keep their spelling; only a value can hold a literal
     // worth redacting, so only a value passes its name as the redaction key.
@@ -2137,7 +2166,7 @@ class QuarkFolderEngine {
     };
 
     const emitFunc = (src) => {
-      const m = src.match(/^func\s*(\([^()]*\))?\s*([A-Za-z_]\w*)\s*[([]/);
+      const m = src.match(new RegExp(String.raw`^func\s*(\([^()]*\))?\s*(${GO_ID})\s*[([]`, 'u'));
       if (!m) return;
       const recv = m[1] ? goReceiverType(m[1]) : '';
       emit('fn', recv ? `${recv}__${m[2]}` : m[2], roleFor(m[2], recv, relPath), (dir) => {
@@ -2147,7 +2176,7 @@ class QuarkFolderEngine {
     };
 
     const emitType = (src) => {
-      const head = src.match(/^([A-Za-z_]\w*)\s*/);
+      const head = src.match(new RegExp(String.raw`^(${GO_ID})\s*`, 'u'));
       if (!head) return;
       const name = head[1];
       let rest = src.slice(head[0].length);
@@ -2165,22 +2194,24 @@ class QuarkFolderEngine {
         if (!body) return;
         const inner = rest.slice(body.open + 1, body.close);
         if (kind === 'struct') {
-          for (const f of parseGoStructFields(inner)) {
-            const fDir = path.join(dir, `${f.embedded ? 'embed' : 'field'}__${safeName(f.name)}`);
+          const fields = parseGoStructFields(inner);
+          const folders = planGoFolders(fields.map((f) => ({ prefix: f.embedded ? 'embed' : 'field', name: f.name })));
+          fields.forEach((f, i) => {
+            const fDir = path.join(dir, folders[i]);
             mkdirSync(fDir);
             leaf(fDir, 'type', f.type);
-          }
+          });
         } else {
-          for (const mem of parseGoInterfaceMembers(inner)) {
-            mkdirSync(path.join(dir, `${mem.kind}__${safeName(mem.name)}`));
-          }
+          const members = parseGoInterfaceMembers(inner);
+          const folders = planGoFolders(members.map((mem) => ({ prefix: mem.kind, name: mem.name })));
+          for (const folder of folders) mkdirSync(path.join(dir, folder));
         }
       });
     };
 
     // `a, b int = 1, 2` → one node per name, each with its own type and value.
     const emitValue = (kind, src) => {
-      const m = src.match(/^([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*([^=]*?)\s*(?:=\s*([\s\S]*))?$/);
+      const m = src.match(new RegExp(String.raw`^(${GO_ID}(?:\s*,\s*${GO_ID})*)\s*([^=]*?)\s*(?:=\s*([\s\S]*))?$`, 'u'));
       if (!m) return;
       const names = m[1].split(',').map((n) => n.trim());
       const values = m[3] ? splitGoTopLevel(m[3]) : [];
@@ -2218,27 +2249,13 @@ class QuarkFolderEngine {
       // `package`, `import` and anything unrecognized materialize nothing.
     }
 
-    const spellings = new Map();
-    for (const d of decls) {
-      const key = d.base.toLowerCase();
-      if (!spellings.has(key)) spellings.set(key, new Set());
-      spellings.get(key).add(d.base);
-    }
-    // Go also allows several `func init()`, `func _()` and `var _ I = (*T)(nil)`
-    // in one file; those share one exact name and take an occurrence suffix.
-    const seen = new Map();
-    for (const d of decls) {
-      let folder = spellings.get(d.base.toLowerCase()).size > 1
-        ? `${d.kind}__${caseDistinctName(safeName(d.name))}`
-        : d.base;
-      const nth = (seen.get(folder) || 0) + 1;
-      seen.set(folder, nth);
-      if (nth > 1) folder = `${folder}__${nth}`;
-      const dir = path.join(fileQuarkPath, folder);
+    const folders = planGoFolders(decls.map((d) => ({ prefix: d.kind, name: d.name })));
+    decls.forEach((d, i) => {
+      const dir = path.join(fileQuarkPath, folders[i]);
       mkdirSync(dir);
       this.registerMirror(d.kind, d.role, relPath, path.relative(this.quarkDir, dir));
       d.fill(dir);
-    }
+    });
   }
 
   // ─── Zig / CUDA C++ (.cu/.cuh) ───
