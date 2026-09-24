@@ -1239,6 +1239,194 @@ function annotateGeneric(text, dir) {
   }
 }
 
+// ─── Go (.go) ───
+//
+// Go is brace-delimited, but processCStyle's line scanner cannot carry it:
+// there is no `;` to end a `var`, raw strings and runes can hold braces, and a
+// single `type ( … )` / `var ( … )` statement declares several symbols. So Go
+// gets a lexer mask and its own declaration walk.
+
+// Blank every comment, string, raw string and rune body to spaces, keeping the
+// delimiters and every newline, so offsets and line numbers still match the
+// source. Shared with the coverage audit for the same reason as
+// stripRubyNonCodeSpans: the audit must stay independent in how it *detects*
+// a symbol, but agreeing on which spans are not code keeps its gaps honest.
+function maskGoNonCode(text) {
+  const blank = (s) => s.replace(/[^\n]/g, ' ');
+  const out = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (c === '/' && (next === '/' || next === '*')) {
+      const end = next === '/' ? text.indexOf('\n', i) : text.indexOf('*/', i + 2);
+      const stop = end < 0 ? text.length : (next === '/' ? end : end + 2);
+      out.push(blank(text.slice(i, stop)));
+      i = stop;
+    } else if (c === '`') {
+      const end = text.indexOf('`', i + 1);
+      const stop = end < 0 ? text.length : end;
+      out.push('`', blank(text.slice(i + 1, stop)), end < 0 ? '' : '`');
+      i = end < 0 ? stop : stop + 1;
+    } else if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1;
+      const closed = text[j] === c;
+      out.push(c, blank(text.slice(i + 1, j)), closed ? c : '');
+      i = closed ? j + 1 : j;
+    } else {
+      out.push(c);
+      i++;
+    }
+  }
+  return out.join('');
+}
+
+function goBracketDelta(line) {
+  let d = 0;
+  for (const c of line) {
+    if (c === '(' || c === '[' || c === '{') d++;
+    else if (c === ')' || c === ']' || c === '}') d--;
+  }
+  return d;
+}
+
+// A line that closes back to depth 0 still continues onto the next one when it
+// ends in a binary operator or comma — the only places Go's automatic
+// semicolon insertion does not end a statement at the newline.
+const GO_CONTINUATION = /(?:[,+\-*/%&|^=.]|&&|\|\||<-)$/;
+
+// Split masked lines [from, to) into declarations. A declaration starts on a
+// line at bracket depth 0 and ends on the first line that returns to depth 0
+// without a continuation, which is where Go would insert the semicolon.
+function splitGoSpecs(masked, from, to) {
+  const specs = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = from; i < to; i++) {
+    const trimmed = masked[i].trim();
+    if (start < 0 && (!trimmed || depth !== 0)) { depth += goBracketDelta(masked[i]); continue; }
+    if (start < 0) start = i;
+    depth += goBracketDelta(masked[i]);
+    if (depth <= 0 && !GO_CONTINUATION.test(trimmed)) {
+      specs.push({ start, end: i + 1 });
+      start = -1;
+      depth = 0;
+    }
+  }
+  if (start >= 0) specs.push({ start, end: to });
+  return specs;
+}
+
+// Comma split that respects (), [] and {} — `a, b = T{1, 2}, f(x, y)`.
+function splitGoTopLevel(text) {
+  const out = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ',' && depth === 0) { out.push(text.slice(start, i)); start = i + 1; }
+  }
+  out.push(text.slice(start));
+  return out.map((s) => s.trim());
+}
+
+// The `{ … }` that closes a declaration: match backwards from its last `}`, so
+// braces in a signature (`func f(x interface{}) {`) are never taken as the body.
+function goBodyRange(src) {
+  const close = src.lastIndexOf('}');
+  if (close < 0) return null;
+  let depth = 0;
+  for (let i = close; i >= 0; i--) {
+    if (src[i] === '}') depth++;
+    else if (src[i] === '{' && --depth === 0) return { open: i, close };
+  }
+  return null;
+}
+
+// `(s *Stack[K, V])`, `(Stack[T])`, `(c Client)` → the receiver's base type.
+function goReceiverType(receiver) {
+  const m = String(receiver).replace(/^\s*\(|\)\s*$/g, '').match(/\*?\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*$/);
+  return m ? m[1] : '';
+}
+
+// Two types in one file both defining String() is ordinary Go, and mkdir is
+// recursive, so a bare `fn__String` would silently merge them. Methods carry
+// their receiver type instead: `(s *Stack[T]) Push` → `Stack__Push`, the same
+// `Type__method` shape the C++ parser uses. Shared with the coverage audit.
+function goFuncFolderName(signature) {
+  const m = String(signature).match(/^\s*(\([^()]*\))?\s*([^\s()]+)\s*$/);
+  if (!m) return String(signature);
+  const recv = m[1] ? goReceiverType(m[1]) : '';
+  return recv ? `${recv}__${m[2]}` : m[2];
+}
+
+// On a case-insensitive filesystem (the macOS and Windows defaults) `Execute`
+// and `execute` are one folder, and mkdir silently merges them — in Go, where
+// case is visibility, such pairs are everywhere. When names in one scope
+// differ only by case, each takes a digest of its exact spelling: a function
+// of the name alone, so the tree is the same on every OS and the coverage
+// audit can recompute it.
+function caseDistinctName(name) {
+  return `${name}__${createHash('sha1').update(name).digest('hex').slice(0, 8)}`;
+}
+
+// Fields at the struct's own depth only: an anonymous nested struct's members
+// belong to that field's type, not to the outer struct.
+function parseGoStructFields(inner) {
+  const fields = [];
+  let depth = 0;
+  for (const line of inner.split('\n')) {
+    const lineDepth = depth;
+    depth += goBracketDelta(line);
+    if (lineDepth !== 0) continue;
+    for (let part of line.split(';')) {
+      part = part.trim().replace(/\s*(?:`[^`]*`|"[^"]*")$/, ''); // struct tag
+      if (!part) continue;
+      let m;
+      if ((m = part.match(/^([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+(\S[\s\S]*)$/))) {
+        const type = m[2].replace(/\s*\{\s*$/, '').trim();
+        for (const name of m[1].split(',')) fields.push({ name: name.trim(), type });
+      } else if ((m = part.match(/^\*?(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)(?:\[[\s\S]*\])?$/))) {
+        fields.push({ name: m[1], type: part, embedded: true });
+      }
+    }
+  }
+  return fields;
+}
+
+// Interface members at the interface's own depth: method signatures and
+// embedded interfaces. Type-set terms (`~int | ~string`) are skipped.
+function parseGoInterfaceMembers(inner) {
+  const members = [];
+  let depth = 0;
+  for (const line of inner.split('\n')) {
+    const lineDepth = depth;
+    depth += goBracketDelta(line);
+    if (lineDepth !== 0) continue;
+    for (let part of line.split(';')) {
+      part = part.trim();
+      let m;
+      if ((m = part.match(/^([A-Za-z_]\w*)\s*\(/))) members.push({ kind: 'method', name: m[1] });
+      else if (/^\*?[A-Za-z_][\w.]*(?:\[[\s\S]*\])?$/.test(part)) members.push({ kind: 'embed', name: part });
+    }
+  }
+  return members;
+}
+
+// `[T any]`, `[K comparable, V any]` are type parameters; `[4]int`, `[N]T` are
+// array types. Returns how many leading characters the parameter list spans.
+function goTypeParamsLength(rest) {
+  if (!/^\[\s*[A-Za-z_]\w*\s*(?:,|\s[^\]\s])/.test(rest)) return 0;
+  let depth = 0;
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '[') depth++;
+    else if (rest[i] === ']' && --depth === 0) return i + 1;
+  }
+  return 0;
+}
+
 // ─── ELF (compiled binary) ───
 //
 // Source analysis can only describe what was written. A linked binary is what
@@ -1416,6 +1604,11 @@ class QuarkFolderEngine {
     '.cjs': /\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
     '.ts': /\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
     '.rb': /^[ \t]*def\s+(?:self\.)?([A-Za-z_][A-Za-z0-9_]*[?!=]?)/gm,
+    // Any line opening with `func`, at any indent, followed by a name and `(`
+    // or `[` — which is what separates a declaration from a func literal. The
+    // name is any run of non-bracket characters, not an identifier pattern, so
+    // a name the parser cannot read (Unicode, say) is reported, not skipped.
+    '.go': /^[ \t]*func\s*(\([^()]*\)\s*[^\s()[\]{}]+|[^\s()[\]{}]+)\s*[(\[]/gm,
   };
 
   // A language whose method names carry characters safeName() flattens must
@@ -1423,11 +1616,13 @@ class QuarkFolderEngine {
   // the tree holds `valid__q` while the scan saw `valid?`.
   static FOLDER_NAME_ENCODERS = {
     '.rb': rubyMethodFolderName,
+    '.go': goFuncFolderName,
   };
 
   // Language-specific non-code spans stripNonCode() cannot see on its own.
   static SOURCE_PRE_STRIPS = {
     '.rb': stripRubyNonCodeSpans,
+    '.go': maskGoNonCode,
   };
 
   // Strip line/block comments and string bodies so a `fn` inside prose or a
@@ -1470,7 +1665,8 @@ class QuarkFolderEngine {
       const encode = QuarkFolderEngine.FOLDER_NAME_ENCODERS[file.ext] || ((n) => n);
       const missing = [...file.names].filter((name) => {
         const folder = encode(name);
-        return !built.has(safeName(folder)) && !built.has(folder);
+        return !built.has(safeName(folder)) && !built.has(folder) &&
+          !built.has(caseDistinctName(safeName(folder)));
       });
       expected += file.names.size;
       matched += file.names.size - missing.length;
@@ -1520,6 +1716,7 @@ class QuarkFolderEngine {
     if (ext === '.m' || ext === '.mm') { this.processObjC(text, fileQuarkPath, relPath); return; }
     if (ext === '.py') { this.processPython(text, fileQuarkPath, relPath); return; }
     if (ext === '.rb') { this.processRuby(text, fileQuarkPath, relPath); return; }
+    if (ext === '.go') { this.processGo(text, fileQuarkPath, relPath); return; }
 
     // Zig / .cu / .cuh — symbol detection + recursive fn body for Zig
     this.processCStyle(text, lines, ext, fileQuarkPath, relPath);
@@ -1663,6 +1860,137 @@ class QuarkFolderEngine {
       }
     };
     registerRecursively(nodes, fileQuarkPath, '');
+  }
+
+  processGo(text, fileQuarkPath, relPath) {
+    // Everything below reads the mask, never the raw text: a `{` in a raw
+    // string or a `func` in a comment cannot move a boundary.
+    const masked = maskGoNonCode(text).split('\n');
+
+    // Declarations are collected first and materialized last, because a
+    // folder name depends on the whole file: see caseDistinctName().
+    const decls = [];
+    const emit = (kind, name, role, fill = () => {}) => {
+      decls.push({ kind, name, role, fill, base: `${kind}__${safeName(name)}` });
+    };
+    // Types are code and keep their spelling; only a value can hold a literal
+    // worth redacting, so only a value passes its name as the redaction key.
+    const leaf = (dir, prefix, value, literalKey) => {
+      const v = String(value || '').replace(/\s+/g, ' ').trim();
+      if (!v) return;
+      const text = literalKey === undefined ? safeName(v) : safeLiteralName(v, literalKey);
+      mkdirSync(path.join(dir, `${prefix}__${text.substring(0, 60)}`));
+    };
+    // A method name like `ServeHTTP` or `Get` rarely carries a role; its
+    // receiver type (`UserHandler`) or the path (`internal/repository/…`) does.
+    const roleFor = (...candidates) => {
+      for (const c of candidates) {
+        if (!c) continue;
+        const role = guessRole(c);
+        if (role !== 'general') return role;
+      }
+      return 'general';
+    };
+
+    const emitFunc = (src) => {
+      const m = src.match(/^func\s*(\([^()]*\))?\s*([A-Za-z_]\w*)\s*[([]/);
+      if (!m) return;
+      const recv = m[1] ? goReceiverType(m[1]) : '';
+      emit('fn', recv ? `${recv}__${m[2]}` : m[2], roleFor(m[2], recv, relPath), (dir) => {
+        const body = goBodyRange(src);
+        if (body) this.quarkifyBodyFlat(src.slice(body.open + 1, body.close), dir);
+      });
+    };
+
+    const emitType = (src) => {
+      const head = src.match(/^([A-Za-z_]\w*)\s*/);
+      if (!head) return;
+      const name = head[1];
+      let rest = src.slice(head[0].length);
+      rest = rest.slice(goTypeParamsLength(rest)).trim();
+      const alias = rest.startsWith('=');
+      if (alias) rest = rest.slice(1).trim();
+      const container = !alias && rest.match(/^(struct|interface)\s*\{/);
+      if (!container) {
+        emit('type', name, roleFor(name, relPath), (dir) => leaf(dir, alias ? 'alias' : 'underlying', rest));
+        return;
+      }
+      const kind = container[1];
+      emit(kind, name, roleFor(name, relPath), (dir) => {
+        const body = goBodyRange(rest);
+        if (!body) return;
+        const inner = rest.slice(body.open + 1, body.close);
+        if (kind === 'struct') {
+          for (const f of parseGoStructFields(inner)) {
+            const fDir = path.join(dir, `${f.embedded ? 'embed' : 'field'}__${safeName(f.name)}`);
+            mkdirSync(fDir);
+            leaf(fDir, 'type', f.type);
+          }
+        } else {
+          for (const mem of parseGoInterfaceMembers(inner)) {
+            mkdirSync(path.join(dir, `${mem.kind}__${safeName(mem.name)}`));
+          }
+        }
+      });
+    };
+
+    // `a, b int = 1, 2` → one node per name, each with its own type and value.
+    const emitValue = (kind, src) => {
+      const m = src.match(/^([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*([^=]*?)\s*(?:=\s*([\s\S]*))?$/);
+      if (!m) return;
+      const names = m[1].split(',').map((n) => n.trim());
+      const values = m[3] ? splitGoTopLevel(m[3]) : [];
+      names.forEach((name, i) => {
+        emit(kind, name, kind === 'var' ? 'state' : 'constant', (dir) => {
+          leaf(dir, 'type', m[2]);
+          leaf(dir, 'default', values.length === names.length ? values[i] : '', name);
+        });
+      });
+    };
+
+    const emitSpec = (keyword, src) => {
+      if (keyword === 'type') emitType(src);
+      else emitValue(keyword, src);
+    };
+
+    for (const spec of splitGoSpecs(masked, 0, masked.length)) {
+      const src = masked.slice(spec.start, spec.end).join('\n').trim();
+      let m;
+      if ((m = src.match(/^(type|var|const)\s*\(/))) {
+        // Grouped declaration: its specs sit between the `(` line and the `)` line.
+        for (const inner of splitGoSpecs(masked, spec.start + 1, spec.end - 1)) {
+          const innerSrc = masked.slice(inner.start, inner.end).join('\n').trim();
+          if (innerSrc && innerSrc !== ')') emitSpec(m[1], innerSrc);
+        }
+      } else if ((m = src.match(/^(type|var|const)\s+/))) {
+        emitSpec(m[1], src.slice(m[0].length));
+      } else if (/^func\b/.test(src)) {
+        emitFunc(src);
+      }
+      // `package`, `import` and anything unrecognized materialize nothing.
+    }
+
+    const spellings = new Map();
+    for (const d of decls) {
+      const key = d.base.toLowerCase();
+      if (!spellings.has(key)) spellings.set(key, new Set());
+      spellings.get(key).add(d.base);
+    }
+    // Go also allows several `func init()`, `func _()` and `var _ I = (*T)(nil)`
+    // in one file; those share one exact name and take an occurrence suffix.
+    const seen = new Map();
+    for (const d of decls) {
+      let folder = spellings.get(d.base.toLowerCase()).size > 1
+        ? `${d.kind}__${caseDistinctName(safeName(d.name))}`
+        : d.base;
+      const nth = (seen.get(folder) || 0) + 1;
+      seen.set(folder, nth);
+      if (nth > 1) folder = `${folder}__${nth}`;
+      const dir = path.join(fileQuarkPath, folder);
+      mkdirSync(dir);
+      this.registerMirror(d.kind, d.role, relPath, path.relative(this.quarkDir, dir));
+      d.fill(dir);
+    }
   }
 
   // ─── Zig / CUDA C++ (.cu/.cuh) ───
