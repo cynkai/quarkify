@@ -875,11 +875,13 @@ class PythonIndentParser {
 //
 // Shared by every block-structured language whose parser emits the
 // { line, index, kind, name, decorators, body[] } node shape — currently
-// PythonIndentParser and RubyEndParser. The parsers differ (indent depth vs
-// `end` keyword); the tree they describe does not, so only one emitter exists.
+// PythonIndentParser, RubyEndParser and GoBlockParser. The parsers differ
+// (indent depth vs `end` keyword vs braces); the tree they describe does not,
+// so only one emitter exists.
 const BLOCK_STMT_KINDS = new Set([
   'if', 'elif', 'elsif', 'else', 'unless', 'for', 'while', 'until', 'case',
   'when', 'try', 'except', 'rescue', 'finally', 'ensure', 'begin', 'do', 'return',
+  'else_if', 'switch', 'select', 'default', 'go', 'defer', 'block', 'label', 'func_lit',
 ]);
 
 function emitBlockNode(node, parentPath, idx) {
@@ -895,6 +897,13 @@ function emitBlockNode(node, parentPath, idx) {
 
   const dir = path.join(parentPath, stmtName);
   ensureDir(dir);
+
+  // Header parts a parser split out — Go's `if init; cond`, `for k, v := range m`,
+  // `case A, B:` — each become one `<part>___<text>` folder.
+  for (const [part, text] of node.clauses || []) {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    if (t) ensureDir(path.join(dir, `${part}___${safeLiteralName(t).substring(0, 40)}`));
+  }
 
   // A Ruby class-body macro (`has_many :posts`, `validates :name, presence: true`)
   // is the structural twin of a Spring annotation, so it lands in the same
@@ -941,6 +950,14 @@ function emitBlockNode(node, parentPath, idx) {
         ensureDir(path.join(dir, `call__${safeName(callName)}`));
       }
     }
+  }
+
+  // Nodes living in a statement's header rather than its block — a Go func
+  // literal inside `if err := db.Update(func…); err != nil` — go under header/.
+  if (node.header && node.header.length > 0) {
+    const headerDir = path.join(dir, 'header');
+    ensureDir(headerDir);
+    emitBlockList(node.header, headerDir);
   }
 
   if (node.body && node.body.length > 0) {
@@ -1295,6 +1312,9 @@ function goBracketDelta(line) {
 // ends in a binary operator or comma — the only places Go's automatic
 // semicolon insertion does not end a statement at the newline.
 const GO_CONTINUATION = /(?:[,+\-*/%&|^=.]|&&|\|\||<-)$/;
+function goContinues(text) {
+  return GO_CONTINUATION.test(text) && !/(?:\+\+|--)$/.test(text); // `i++` ends a statement
+}
 
 // Split masked lines [from, to) into declarations. A declaration starts on a
 // line at bracket depth 0 and ends on the first line that returns to depth 0
@@ -1308,7 +1328,7 @@ function splitGoSpecs(masked, from, to) {
     if (start < 0 && (!trimmed || depth !== 0)) { depth += goBracketDelta(masked[i]); continue; }
     if (start < 0) start = i;
     depth += goBracketDelta(masked[i]);
-    if (depth <= 0 && !GO_CONTINUATION.test(trimmed)) {
+    if (depth <= 0 && !goContinues(trimmed)) {
       specs.push({ start, end: i + 1 });
       start = -1;
       depth = 0;
@@ -1318,15 +1338,16 @@ function splitGoSpecs(masked, from, to) {
   return specs;
 }
 
-// Comma split that respects (), [] and {} — `a, b = T{1, 2}, f(x, y)`.
-function splitGoTopLevel(text) {
+// Split that respects (), [] and {} — `a, b = T{1, 2}, f(x, y)`, or a
+// header's `init; cond` with `sep` = ';'.
+function splitGoTopLevel(text, sep = ',') {
   const out = [];
   let depth = 0, start = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (c === '(' || c === '[' || c === '{') depth++;
     else if (c === ')' || c === ']' || c === '}') depth--;
-    else if (c === ',' && depth === 0) { out.push(text.slice(start, i)); start = i + 1; }
+    else if (c === sep && depth === 0) { out.push(text.slice(start, i)); start = i + 1; }
   }
   out.push(text.slice(start));
   return out.map((s) => s.trim());
@@ -1425,6 +1446,229 @@ function goTypeParamsLength(rest) {
     else if (rest[i] === ']' && --depth === 0) return i + 1;
   }
   return 0;
+}
+
+function goMatchBrace(src, open) {
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) return i;
+  }
+  return src.length;
+}
+
+// ─── Go function bodies ───
+//
+// A Go statement ends at a newline, not a `;`, and `if`/`for`/`switch` take no
+// parentheses — so quarkifyBodyFlat's split on `;{}` fused consecutive lines
+// into one statement, merged every `return` into one folder, and never read a
+// condition. This parser emits the node shape emitBlockNode already renders
+// for Python and Ruby, plus `clauses`: the header parts (`init`, `cond`,
+// `range`, `value`, …) that become `<part>___<text>` folders. It reads masked
+// source only, so literals and comments cannot move a boundary.
+const GO_STMT_KEYWORD = /(if|for|switch|select|case|default)\b/y;
+const GO_ELSE = /[ \t]*else\b\s*/y;
+const GO_LABEL = /([A-Za-z_]\w*)[ \t]*:(?!=)/y;
+// What may follow the `}` that closes a block: the statement is over.
+const GO_BLOCK_END = /[ \t]*(?:$|[\n;}]|else\b)/y;
+
+class GoBlockParser {
+  constructor(src) {
+    this.s = src;
+    this.p = 0;
+  }
+
+  parse() {
+    const nodes = [];
+    while (this.p < this.s.length) {
+      nodes.push(...this.parseList(false));
+      if (this.s[this.p] === '}') this.p++; // stray closer: skip it rather than stop
+    }
+    return nodes;
+  }
+
+  at(re) {
+    re.lastIndex = this.p;
+    return re.exec(this.s);
+  }
+
+  parseList(inClause) {
+    const nodes = [];
+    for (;;) {
+      while (this.p < this.s.length && /[\s;]/.test(this.s[this.p])) this.p++;
+      if (this.p >= this.s.length || this.s[this.p] === '}') return nodes;
+      const kw = this.at(GO_STMT_KEYWORD)?.[1];
+      if (inClause && (kw === 'case' || kw === 'default')) return nodes;
+      const before = this.p;
+      nodes.push(...this.parseStatement(kw));
+      if (this.p === before) this.p++;
+    }
+  }
+
+  parseStatement(kw) {
+    if (kw === 'if') return this.parseIf();
+    if (kw === 'for') return [this.parseFor()];
+    if (kw === 'switch' || kw === 'select') return [this.parseSwitch(kw)];
+    if (kw === 'case' || kw === 'default') return [this.parseClause(kw)];
+    if (this.s[this.p] === '{') return [{ kind: 'block', line: '', body: this.parseBlock() }];
+    const label = this.at(GO_LABEL);
+    if (label) {
+      this.p = GO_LABEL.lastIndex;
+      return [{ kind: 'label', line: '', clauses: [['name', label[1]]], body: [] }];
+    }
+    return [this.parseSimple()];
+  }
+
+  parseBlock() {
+    if (this.s[this.p] !== '{') return [];
+    this.p++;
+    const nodes = this.parseList(false);
+    if (this.s[this.p] === '}') this.p++;
+    return nodes;
+  }
+
+  // The header runs to the `{` that opens the block. A composite literal in a
+  // header (`range []int{1, 2} {`) has a `{` too, but its `}` is followed by
+  // more header, where a block's `}` ends the statement.
+  readHeader(keyword) {
+    this.p += keyword.length;
+    let depth = 0;
+    let i = this.p;
+    for (; i < this.s.length; i++) {
+      const c = this.s[i];
+      if (c === '(' || c === '[') depth++;
+      else if (c === ')' || c === ']') depth--;
+      else if (c === '}' && depth === 0) break; // malformed: ran into the enclosing block
+      else if (c === '{' && depth === 0) {
+        const close = goMatchBrace(this.s, i);
+        GO_BLOCK_END.lastIndex = close + 1;
+        if (GO_BLOCK_END.test(this.s)) break;
+        i = close;
+      }
+    }
+    const header = this.s.slice(this.p, i).trim();
+    this.p = i;
+    return header;
+  }
+
+  // An if/else chain's branches are siblings, the same flat shape Python's
+  // elif/else and Ruby's elsif/else take.
+  parseIf() {
+    const nodes = [];
+    let kind = 'if';
+    for (;;) {
+      const { line, lits } = goExtractFuncLits(this.readHeader('if'));
+      const parts = splitGoTopLevel(line, ';');
+      const clauses = parts.length > 1 ? [['init', parts[0]], ['cond', parts[1]]] : [['cond', parts[0]]];
+      nodes.push({ kind, line, clauses, header: lits, body: this.parseBlock() });
+      if (!this.at(GO_ELSE)) return nodes;
+      this.p = GO_ELSE.lastIndex;
+      if (this.at(GO_STMT_KEYWORD)?.[1] === 'if') { kind = 'else_if'; continue; }
+      nodes.push({ kind: 'else', line: '', body: this.parseBlock() });
+      return nodes;
+    }
+  }
+
+  parseFor() {
+    const { line: header, lits } = goExtractFuncLits(this.readHeader('for'));
+    const parts = splitGoTopLevel(header, ';');
+    let clauses = [];
+    if (parts.length === 3) {
+      clauses = [['init', parts[0]], ['cond', parts[1]], ['post', parts[2]]];
+    } else {
+      const range = header.match(/^(?:([\s\S]*?)\s*:?=\s*)?range\b\s*([\s\S]*)$/);
+      if (range) clauses = [['vars', range[1]], ['range', range[2]]];
+      else if (header) clauses = [['cond', header]];
+    }
+    return { kind: 'for', line: header, clauses, header: lits, body: this.parseBlock() };
+  }
+
+  parseSwitch(kw) {
+    const { line, lits } = goExtractFuncLits(this.readHeader(kw));
+    const parts = splitGoTopLevel(line, ';');
+    const clauses = parts.length > 1 ? [['init', parts[0]], ['tag', parts[1]]] : [['tag', parts[0]]];
+    return { kind: kw, line, clauses, header: lits, body: this.parseBlock() };
+  }
+
+  // `case A, B:` / `case v := <-ch:` / `default:` — the header ends at the
+  // first `:` at depth 0 that is not part of `:=`, and the clause's body runs
+  // to the next case.
+  parseClause(kw) {
+    this.p += kw.length;
+    let depth = 0;
+    let i = this.p;
+    for (; i < this.s.length; i++) {
+      const c = this.s[i];
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') { if (depth === 0) break; depth--; }
+      else if (c === ':' && depth === 0 && this.s[i + 1] !== '=') break;
+    }
+    const value = this.s.slice(this.p, i).trim();
+    this.p = this.s[i] === ':' ? i + 1 : i;
+    return { kind: kw, line: value, clauses: [['value', value]], body: this.parseList(true) };
+  }
+
+  parseSimple() {
+    let depth = 0;
+    let i = this.p;
+    for (; i < this.s.length; i++) {
+      const c = this.s[i];
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') { if (depth === 0) break; depth--; }
+      else if (depth === 0 && c === ';') break;
+      else if (depth === 0 && c === '\n' && !goContinues(this.s.slice(this.p, i).trimEnd())) break;
+    }
+    const text = this.s.slice(this.p, i).trim();
+    this.p = this.s[i] === ';' ? i + 1 : i;
+    return goSimpleNode(text);
+  }
+}
+
+// Func literals inside a statement or header (`go func() {…}()`,
+// `if err := db.Update(func(tx *Tx) error {…}); err != nil`) become func_lit
+// nodes with their own parsed bodies, and are cut out of the line so their
+// calls are not credited to the statement. What is left of `func` — the cut
+// literal, or a func type like `var f func(int) error` — reads `<func>`, which
+// no call scan takes for a name.
+function goExtractFuncLits(text) {
+  const lits = [];
+  let line = '';
+  let last = 0;
+  const re = /\bfunc\s*\(/g;
+  let m;
+  while ((m = re.exec(text))) {
+    // `map[string]func()` and `chan func()` are func types, not literals.
+    if (/(?:\]|\bchan)\s*$/.test(text.slice(0, m.index))) continue;
+    let i = m.index + m[0].length - 1;
+    for (let depth = 0; i < text.length; i++) {
+      if (text[i] === '(') depth++;
+      else if (text[i] === ')' && --depth === 0) break;
+    }
+    let open = -1;
+    for (let j = i + 1, depth = 0; j < text.length; j++) {
+      const c = text[j];
+      if (c === '(' || c === '[') depth++;
+      else if (c === ')' || c === ']') { if (--depth < 0) break; }
+      else if (c === ',' && depth === 0) break;
+      else if (c === '{' && depth === 0) { open = j; break; }
+    }
+    if (open < 0) continue; // a func type: `var f func(int) error`
+    const close = goMatchBrace(text, open);
+    line += `${text.slice(last, m.index)}<func>`;
+    lits.push({ kind: 'func_lit', line: '', body: new GoBlockParser(text.slice(open + 1, close)).parse() });
+    last = close + 1;
+    re.lastIndex = last;
+  }
+  line = (line + text.slice(last)).replace(/\bfunc\b/g, '<func>').trim();
+  return { line, lits };
+}
+
+function goSimpleNode(text) {
+  const { line, lits: body } = goExtractFuncLits(text);
+  const kw = line.match(/^(return|go|defer)\b/);
+  const kind = kw ? kw[1] : 'expr';
+  const clauses = kind === 'return' ? [['val', line.slice(6)]] : undefined;
+  return { kind, line, clauses, body };
 }
 
 // ─── ELF (compiled binary) ───
@@ -1898,7 +2142,7 @@ class QuarkFolderEngine {
       const recv = m[1] ? goReceiverType(m[1]) : '';
       emit('fn', recv ? `${recv}__${m[2]}` : m[2], roleFor(m[2], recv, relPath), (dir) => {
         const body = goBodyRange(src);
-        if (body) this.quarkifyBodyFlat(src.slice(body.open + 1, body.close), dir);
+        if (body) emitBlockList(new GoBlockParser(src.slice(body.open + 1, body.close)).parse(), dir);
       });
     };
 
@@ -1943,7 +2187,11 @@ class QuarkFolderEngine {
       names.forEach((name, i) => {
         emit(kind, name, kind === 'var' ? 'state' : 'constant', (dir) => {
           leaf(dir, 'type', m[2]);
-          leaf(dir, 'default', values.length === names.length ? values[i] : '', name);
+          // `var handler = func(w http.ResponseWriter, r *http.Request) {…}` is
+          // a function in all but name: its body is materialized like one.
+          const { line, lits } = goExtractFuncLits(values.length === names.length ? values[i] : '');
+          leaf(dir, 'default', line, name);
+          emitBlockList(lits, dir);
         });
       });
     };

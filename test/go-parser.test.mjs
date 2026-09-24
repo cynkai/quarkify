@@ -87,7 +87,7 @@ test('functions, generic functions and receiver methods become fn folders', asyn
       'fn__Keys', 'fn__Map', 'fn__New', 'fn__Pair__Key', 'fn__Stack__Len', 'fn__Stack__Push',
     ]);
     const entries = await listRelativeEntries(fileQuark);
-    assert.ok(entries.includes('fn__Stack__Push/stmt_0/call__append'), entries.join('\n'));
+    assert.ok(entries.includes('fn__Stack__Push/stmt_0__expr/call__append'), entries.join('\n'));
   });
 });
 
@@ -105,8 +105,8 @@ test('the same method name on different receivers keeps distinct nodes', async (
 
     assert.equal(result.status, 0, result.stderr);
     const entries = await listRelativeEntries(fileQuark);
-    assert.ok(entries.includes('fn__Color__String/return/call__colorName'), entries.join('\n'));
-    assert.ok(entries.includes('fn__Shade__String/return/call__shadeName'), entries.join('\n'));
+    assert.ok(entries.includes('fn__Color__String/stmt_0__return/call__colorName'), entries.join('\n'));
+    assert.ok(entries.includes('fn__Shade__String/stmt_0__return/call__shadeName'), entries.join('\n'));
     assert.ok(!entries.some((e) => e.startsWith('fn__String')), entries.join('\n'));
   });
 });
@@ -126,9 +126,9 @@ test('repeated init and blank declarations do not merge into one folder', async 
 
     assert.equal(result.status, 0, result.stderr);
     const entries = await listRelativeEntries(fileQuark);
-    assert.ok(entries.includes('fn__init/stmt_0/call__registerA'), entries.join('\n'));
-    assert.ok(entries.includes('fn__init__2/stmt_0/call__registerB'), entries.join('\n'));
-    assert.ok(!entries.includes('fn__init/stmt_0/call__registerB'), entries.join('\n'));
+    assert.ok(entries.includes('fn__init/stmt_0__expr/call__registerA'), entries.join('\n'));
+    assert.ok(entries.includes('fn__init__2/stmt_0__expr/call__registerB'), entries.join('\n'));
+    assert.ok(!entries.includes('fn__init/stmt_0__expr/call__registerB'), entries.join('\n'));
     assert.ok(entries.includes('var___/type__io.Reader'), entries.join('\n'));
     assert.ok(entries.includes('var_____2/type__io.Writer'), entries.join('\n'));
   });
@@ -157,9 +157,9 @@ test('names differing only by case keep distinct nodes on any filesystem', async
     const lower = top.find((e) => /^fn__Command__execute__[0-9a-f]{8}$/.test(e));
     assert.ok(upper && lower, top.join('\n'));
     const entries = await listRelativeEntries(fileQuark);
-    assert.ok(entries.includes(`${upper}/return/call__execute`), entries.join('\n'));
-    assert.ok(entries.includes(`${lower}/return/call__runPublic`), entries.join('\n'));
-    assert.ok(!entries.includes(`${upper}/return/call__runPublic`), entries.join('\n'));
+    assert.ok(entries.includes(`${upper}/stmt_0__return/call__execute`), entries.join('\n'));
+    assert.ok(entries.includes(`${lower}/stmt_0__return/call__runPublic`), entries.join('\n'));
+    assert.ok(!entries.includes(`${upper}/stmt_0__return/call__runPublic`), entries.join('\n'));
   });
 });
 
@@ -402,5 +402,198 @@ test('declarations the parser loses are reported and fail --strict-coverage', as
     assert.notEqual(strict.result.status, 0);
     assert.match(`${strict.result.stdout}${strict.result.stderr}`, /Lost/);
     assert.match(`${strict.result.stdout}${strict.result.stderr}`, /alsoLost/);
+  });
+});
+
+// A Go statement ends at a newline. Splitting bodies on `;{}` fused a line
+// into the `if` below it, so the `if` vanished and every `return` merged into
+// one folder.
+test('each line of a function body is its own statement node', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnGo(workspace, [
+      'package find',
+      '',
+      'func Find(args []string) (string, error) {',
+      '\trest := strip(args)',
+      '\tif len(rest) == 0 {',
+      '\t\treturn first, nil',
+      '\t}',
+      '\treturn last, nil',
+      '}',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(path.join(fileQuark, 'fn__Find'));
+    assert.deepEqual(entries.filter((e) => !e.includes('/')), ['stmt_0__expr', 'stmt_1__if', 'stmt_2__return']);
+    for (const expected of [
+      'stmt_0__expr/call__strip',
+      'stmt_1__if/cond___len_rest_____0',
+      'stmt_1__if/body/stmt_0__return/val___first__nil',
+      'stmt_2__return/val___last__nil',
+    ]) {
+      assert.ok(entries.includes(expected), `${expected} missing:\n${entries.join('\n')}`);
+    }
+  });
+});
+
+test('if, for, switch and select headers are split into their clauses', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnGo(workspace, [
+      'package flow',
+      '',
+      'func Flow(m map[string]int, ch chan int) (total int) {',
+      '\tif err := load(); err != nil {',
+      '\t\tfail(err)',
+      '\t} else if total > 10 {',
+      '\t\ttotal = 10',
+      '\t} else {',
+      '\t\ttotal++',
+      '\t}',
+      '\tfor i := 0; i < 3; i++ {',
+      '\t\ttotal += i',
+      '\t}',
+      '\tfor k, v := range m {',
+      '\t\tuse(k, v)',
+      '\t}',
+      '\tfor _, n := range []int{1, 2} {',
+      '\t\ttotal += n',
+      '\t}',
+      '\tfor total < 100 {',
+      '\t\ttotal *= 2',
+      '\t}',
+      '\tswitch x := pick(); x {',
+      '\tcase 1, 2:',
+      '\t\tone()',
+      '\tdefault:',
+      '\t\tother()',
+      '\t}',
+      '\tselect {',
+      '\tcase n := <-ch:',
+      '\t\ttotal += n',
+      '\t}',
+      '\treturn total',
+      '}',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(path.join(fileQuark, 'fn__Flow'));
+    assert.deepEqual(entries.filter((e) => !e.includes('/')), [
+      'stmt_0__if', 'stmt_1__else_if', 'stmt_2__else', 'stmt_3__for', 'stmt_4__for',
+      'stmt_5__for', 'stmt_6__for', 'stmt_7__switch', 'stmt_8__select', 'stmt_9__return',
+    ].sort());
+    for (const expected of [
+      'stmt_0__if/init___err____load__',
+      'stmt_0__if/cond___err____nil',
+      'stmt_0__if/call__load',
+      'stmt_0__if/body/stmt_0__expr/call__fail',
+      'stmt_1__else_if/cond___total___10',
+      'stmt_2__else/body/stmt_0__expr',
+      'stmt_3__for/init___i____0',
+      'stmt_3__for/cond___i___3',
+      'stmt_3__for/post___i__',
+      'stmt_4__for/vars___k__v',
+      'stmt_4__for/range___m',
+      'stmt_4__for/body/stmt_0__expr/call__use',
+      // a composite literal in the header is not the loop's block
+      'stmt_5__for/range_____int_1__2_',
+      'stmt_5__for/body/stmt_0__expr',
+      'stmt_6__for/cond___total___100',
+      'stmt_7__switch/init___x____pick__',
+      'stmt_7__switch/tag___x',
+      'stmt_7__switch/body/stmt_0__case/value___1__2',
+      'stmt_7__switch/body/stmt_0__case/body/stmt_0__expr/call__one',
+      'stmt_7__switch/body/stmt_1__default/body/stmt_0__expr/call__other',
+      'stmt_8__select/body/stmt_0__case/value___n______ch',
+      'stmt_9__return/val___total',
+    ]) {
+      assert.ok(entries.includes(expected), `${expected} missing:\n${entries.join('\n')}`);
+    }
+  });
+});
+
+// A closure's statements belong to the closure, and a multi-line composite
+// literal is one statement.
+test('func literals get their own body and multi-line literals stay whole', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnGo(workspace, [
+      'package async',
+      '',
+      'func Start(t *testing.T) {',
+      '\tvar handler func(int) error',
+      '\tcfg := Config{',
+      '\t\tName: name,',
+      '\t\tPort: port(),',
+      '\t}',
+      '\tgo func() {',
+      '\t\twork(cfg)',
+      '\t}()',
+      '\tt.Run(label, func(t *testing.T) {',
+      '\t\tif !check() {',
+      '\t\t\tt.Fail()',
+      '\t\t}',
+      '\t})',
+      '\tdefer cleanup()',
+      '}',
+      '',
+      'func Save(db *DB) {',
+      '\tif err := db.Update(func(tx *Tx) error {',
+      '\t\treturn tx.Put(key)',
+      '\t}); err != nil {',
+      '\t\tpanic(err)',
+      '\t}',
+      '}',
+      '',
+      'var formatter = func(p Params) string {',
+      '\tif p.Color() {',
+      '\t\treturn colored(p)',
+      '\t}',
+      '\treturn plain(p)',
+      '}',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(path.join(fileQuark, 'fn__Start'));
+    assert.deepEqual(entries.filter((e) => !e.includes('/')), [
+      'stmt_0__expr', 'stmt_1__expr', 'stmt_2__go', 'stmt_3__expr', 'stmt_4__defer',
+    ]);
+    for (const expected of [
+      'stmt_1__expr/call__port',
+      'stmt_2__go/body/stmt_0__func_lit/body/stmt_0__expr/call__work',
+      'stmt_3__expr/call__Run',
+      'stmt_3__expr/body/stmt_0__func_lit/body/stmt_0__if/call__check',
+      'stmt_3__expr/body/stmt_0__func_lit/body/stmt_0__if/body/stmt_0__expr/call__Fail',
+      'stmt_4__defer/call__cleanup',
+    ]) {
+      assert.ok(entries.includes(expected), `${expected} missing:\n${entries.join('\n')}`);
+    }
+    // `func` in a func type or a cut literal is not a call, and a closure's
+    // calls are not credited to the statement that holds it.
+    assert.ok(!entries.some((e) => /call__(func|go)$/.test(e)), entries.join('\n'));
+    assert.ok(!entries.includes('stmt_3__expr/call__check'), entries.join('\n'));
+
+    // A literal in an if header goes under header/, not into the if's block.
+    const save = await listRelativeEntries(path.join(fileQuark, 'fn__Save'));
+    for (const expected of [
+      'stmt_0__if/call__Update',
+      'stmt_0__if/cond___err____nil',
+      'stmt_0__if/header/stmt_0__func_lit/body/stmt_0__return/call__Put',
+      'stmt_0__if/body/stmt_0__expr/call__panic',
+    ]) {
+      assert.ok(save.includes(expected), `${expected} missing:\n${save.join('\n')}`);
+    }
+    assert.ok(!save.includes('stmt_0__if/call__Put'), save.join('\n'));
+
+    // A package-level func value's body is materialized like a function's.
+    const formatter = await listRelativeEntries(path.join(fileQuark, 'var__formatter'));
+    for (const expected of [
+      'stmt_0__func_lit/body/stmt_0__if/cond___p.Color__',
+      'stmt_0__func_lit/body/stmt_0__if/body/stmt_0__return/call__colored',
+      'stmt_0__func_lit/body/stmt_1__return/call__plain',
+    ]) {
+      assert.ok(formatter.includes(expected), `${expected} missing:\n${formatter.join('\n')}`);
+    }
   });
 });
