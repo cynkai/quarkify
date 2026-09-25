@@ -1714,13 +1714,7 @@ class QuarkFolderEngine {
           } else {
             fields = parseZigStructFields(inner);
           }
-          for (const f of fields) {
-            const fDir = path.join(symQuarkPath, `field__${safeName(f.name)}`);
-            mkdirSync(fDir);
-            if (f.type) mkdirSync(path.join(fDir, `type__${safeName(f.type).substring(0, 60)}`));
-            if (f.default) mkdirSync(path.join(fDir, `default__${safeLiteralName(f.default, f.name).substring(0, 60)}`));
-            else mkdirSync(path.join(fDir, `default__missing__uninit_hazard`));
-          }
+          this.emitFieldFolders(symQuarkPath, fields);
           // RECURSE into the container body
           if (/(?:^|\n)\s*(?:pub\s+)?(?:export\s+|extern\s+(?:\"[^\"]*\"\s+)?|noinline\s+|inline\s+)?fn\s+[a-zA-Z0-9_]+\s*\(|(?:^|\n)\s*(?:pub\s+)?const\s+[a-zA-Z0-9_]+\s*=\s*(?:extern\s+|packed\s+)?(?:struct|union|enum)|(?:^|\n)\s*(?:template\s*<[^>]*>\s*)?(?:class|struct)\s+[a-zA-Z_]|\b(?:class|interface|enum|record)\s+[a-zA-Z0-9_]+|\b[a-zA-Z0-9_]+\s+[a-zA-Z0-9_]+\s*\([^;]*\{|\b(?:function)\b|=>/.test(inner)) {
             const innerLines = inner.split('\n');
@@ -1743,6 +1737,7 @@ class QuarkFolderEngine {
             else if (parser.p === before) parser.p++;
           }
           emitStmtList(stmts, symQuarkPath);
+          if (ext === '.zig') this.materializeZigReturnedType(body, symQuarkPath, relPath);
         }
       } else {
         this.quarkifyBodyFlat(body, symQuarkPath);
@@ -1842,6 +1837,39 @@ class QuarkFolderEngine {
       }
     }
     finishSymbol(lines.length);
+  }
+
+  emitFieldFolders(parentPath, fields) {
+    for (const f of fields) {
+      const fDir = path.join(parentPath, `field__${safeName(f.name)}`);
+      mkdirSync(fDir);
+      if (f.type) mkdirSync(path.join(fDir, `type__${safeName(f.type).substring(0, 60)}`));
+      if (f.default) mkdirSync(path.join(fDir, `default__${safeLiteralName(f.default, f.name).substring(0, 60)}`));
+      else mkdirSync(path.join(fDir, `default__missing__uninit_hazard`));
+    }
+  }
+
+  // `pub fn Server(comptime H: type) type { return struct { … }; }` is how Zig
+  // spells a generic type, and the returned container's fields and methods
+  // are that type's whole API. The statement walk above sees only a `return`,
+  // so materialize the container under returns__<kind>/ like a named struct.
+  materializeZigReturnedType(body, symQuarkPath, relPath) {
+    const open = body.indexOf('{');
+    if (open < 0 || !/\)\s*type\s*$/.test(body.slice(0, open))) return;
+    const ret = /\breturn\s+(?:extern\s+|packed\s+)?(struct|union|enum|opaque)\b[^{;]*\{/.exec(body.slice(open + 1));
+    if (!ret) return;
+    const start = open + ret.index + ret[0].length; // the container's `{`
+    let close = -1;
+    for (let i = start, depth = 0; i < body.length; i++) {
+      if (body[i] === '{') depth++;
+      else if (body[i] === '}' && --depth === 0) { close = i; break; }
+    }
+    if (close < 0) return;
+    const inner = body.slice(start + 1, close);
+    const dir = path.join(symQuarkPath, `returns__${ret[1]}`);
+    mkdirSync(dir);
+    this.emitFieldFolders(dir, parseZigStructFields(inner));
+    this.processCStyle(inner, inner.split('\n'), '.zig', dir, relPath);
   }
 
   quarkifyBodyFlat(body, parentPath) {
