@@ -1745,7 +1745,12 @@ class QuarkFolderEngine {
           emitStmtList(stmts, symQuarkPath);
         }
       } else {
-        this.quarkifyBodyFlat(body, symQuarkPath);
+        // A function's text starts with its own signature, and splitting that
+        // into statements read `add(int a, int b)` as a call: every function
+        // listed itself under call__<own name>, so `fd call__add` returned the
+        // definition as one of add's callers. Only the body is statements.
+        const inner = FUNCTION_LIKE_KINDS.has(cur.kind) ? functionBodyBlock(body) : null;
+        this.quarkifyBodyFlat(inner ?? body, symQuarkPath);
       }
 
       this.registerMirror(cur.kind, cur.role, relPath, path.relative(this.quarkDir, symQuarkPath));
@@ -2736,6 +2741,39 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+const FUNCTION_LIKE_KINDS = new Set(['fn', 'method', 'kernel', 'device_fn', 'host_fn']);
+
+// The inside of the brace block that ends a function's text, or null when the
+// text does not end with one (`const f = () => x;`, `=> ({ … })`). The block is
+// the last top-level one, so a `{` in the parameters (`function f({ a } = {})`)
+// or a C++ member initializer (`: a{1}`) is not mistaken for it. Strings and
+// comments are skipped so a brace inside a literal is not counted.
+function functionBodyBlock(text) {
+  const stack = [];
+  let block = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && (c === '`' || text[j] !== '\n')) j += text[j] === '\\' ? 2 : 1;
+      i = j;
+    } else if (c === '/' && text[i + 1] === '/') {
+      const end = text.indexOf('\n', i);
+      i = end < 0 ? text.length : end;
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? text.length : end + 1;
+    } else if (c === '{') {
+      stack.push(i);
+    } else if (c === '}' && stack.length) {
+      const open = stack.pop();
+      if (!stack.length) block = [open, i];
+    }
+  }
+  if (!block || !/^[\s;]*$/.test(text.slice(block[1] + 1))) return null;
+  return text.slice(block[0] + 1, block[1]);
 }
 
 function splitParamsTopLevel(text) {
