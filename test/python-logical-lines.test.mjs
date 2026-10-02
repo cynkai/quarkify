@@ -148,3 +148,27 @@ test('a multi-line decorator is attached to its function', async () => {
     assert.ok(entries.some((e) => e.startsWith('fn__items/decorator__app.route/arg__methods___')), listing);
   });
 });
+
+// A plain string can continue onto the next physical line with an escaped
+// newline. If the joiner forgot it was inside the string there, the `(` would
+// open a bracket that never closes and swallow the rest of the file.
+test('a plain string continued by an escaped newline keeps its brackets out of the count', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnPython(workspace, [
+      'def first():',
+      '    text = "hello\\',
+      '(world"',
+      '    return text',
+      '',
+      'def after():',
+      '    return 1',
+      '',
+    ].join('\n'));
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(fileQuark);
+    const listing = entries.join('\n');
+    assert.deepEqual(topLevel(entries).sort(), ['fn__after', 'fn__first'], listing);
+    assert.ok(entries.includes('fn__first/stmt_1__return'), listing);
+  });
+});

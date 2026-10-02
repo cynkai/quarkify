@@ -885,9 +885,9 @@ function joinPythonLogicalLines(lines) {
   const out = [];
   let depth = 0;
   let triple = null; // the open '"""' or "'''" while inside one
+  let quote = null; // the open ' or " of a plain string
   let pending = null;
   for (const raw of lines) {
-    let quote = null; // a plain string cannot outlive its physical line
     let i = 0;
     while (i < raw.length) {
       const c = raw[i];
@@ -908,6 +908,10 @@ function joinPythonLogicalLines(lines) {
         i++;
       }
     }
+    // A plain string ends with its physical line unless an escaped newline
+    // (`"hello\` + newline) continues it; otherwise its `(` on the next line
+    // would be counted as code and swallow the rest of the file.
+    if (quote && !/\\\r?$/.test(raw)) quote = null;
     let code = raw.slice(0, i);
     const backslash = !triple && /\\\s*$/.test(code);
     if (backslash) code = code.replace(/\\\s*$/, '');
