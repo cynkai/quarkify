@@ -245,6 +245,33 @@ function classifyPtxArg(raw, opcode) {
   return { kind: 'other', value: r, type: '' };
 }
 
+// Zig source with string and character literals, `\\` multiline string
+// lines and `//` comments replaced by spaces. Length and newlines are kept, so
+// an index into the result is an index into the original.
+function maskZigNonCode(text) {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    let end;
+    if ((c === '/' && text[i + 1] === '/') || (c === '\\' && text[i + 1] === '\\')) {
+      end = text.indexOf('\n', i);
+      if (end < 0) end = text.length;
+    } else if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1;
+      end = Math.min(text.length, text[j] === c ? j + 1 : j);
+    } else {
+      out += c;
+      i++;
+      continue;
+    }
+    out += text.slice(i, end).replace(/[^\n]/g, ' ');
+    i = end;
+  }
+  return out;
+}
+
 // ─── Zig struct 필드 파서 (Zig Struct Field Parser) ───
 function parseZigStructFields(body) {
   const fields = [];
@@ -1854,15 +1881,19 @@ class QuarkFolderEngine {
   // are that type's whole API. The statement walk above sees only a `return`,
   // so materialize the container under returns__<kind>/ like a named struct.
   materializeZigReturnedType(body, symQuarkPath, relPath) {
-    const open = body.indexOf('{');
-    if (open < 0 || !/\)\s*type\s*$/.test(body.slice(0, open))) return;
-    const ret = /\breturn\s+(?:extern\s+|packed\s+)?(struct|union|enum|opaque)\b[^{;]*\{/.exec(body.slice(open + 1));
+    // Locate and match braces on a masked copy (same length, literals and
+    // comments blanked) so a `}` in `"}"` or a `return struct {` in a comment
+    // does not move the container's bounds; slice the real text afterwards.
+    const code = maskZigNonCode(body);
+    const open = code.indexOf('{');
+    if (open < 0 || !/\)\s*type\s*$/.test(code.slice(0, open))) return;
+    const ret = /\breturn\s+(?:extern\s+|packed\s+)?(struct|union|enum|opaque)\b[^{;]*\{/.exec(code.slice(open + 1));
     if (!ret) return;
     const start = open + ret.index + ret[0].length; // the container's `{`
     let close = -1;
-    for (let i = start, depth = 0; i < body.length; i++) {
-      if (body[i] === '{') depth++;
-      else if (body[i] === '}' && --depth === 0) { close = i; break; }
+    for (let i = start, depth = 0; i < code.length; i++) {
+      if (code[i] === '{') depth++;
+      else if (code[i] === '}' && --depth === 0) { close = i; break; }
     }
     if (close < 0) return;
     const inner = body.slice(start + 1, close);

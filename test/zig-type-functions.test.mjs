@@ -141,3 +141,33 @@ test('nested and packed type functions are materialized', async () => {
     }
   });
 });
+
+// The container's closing `}` is found by brace matching. A `}` inside a
+// string, a character literal or a comment is text, and counting it closed
+// the container early: `run` below was dropped and --strict-coverage failed.
+test('braces inside literals and comments do not end the returned container', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnZig(workspace, [
+      'pub fn Type() type {',
+      '    // return struct { is not the container',
+      '    return struct {',
+      '        label: []const u8 = "}",',
+      "        close: u8 = '}',",
+      '        // }',
+      '        pub fn run() void {}',
+      '    };',
+      '}',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(fileQuark);
+    for (const expected of [
+      'fn__Type/returns__struct/field__label',
+      'fn__Type/returns__struct/field__close',
+      'fn__Type/returns__struct/fn__run',
+    ]) {
+      assert.ok(entries.includes(expected), `${expected} missing:\n${entries.join('\n')}`);
+    }
+  });
+});
