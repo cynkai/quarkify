@@ -1866,43 +1866,6 @@ class QuarkFolderEngine {
     finishSymbol(lines.length);
   }
 
-  emitFieldFolders(parentPath, fields) {
-    for (const f of fields) {
-      const fDir = path.join(parentPath, `field__${safeName(f.name)}`);
-      mkdirSync(fDir);
-      if (f.type) mkdirSync(path.join(fDir, `type__${safeName(f.type).substring(0, 60)}`));
-      if (f.default) mkdirSync(path.join(fDir, `default__${safeLiteralName(f.default, f.name).substring(0, 60)}`));
-      else mkdirSync(path.join(fDir, `default__missing__uninit_hazard`));
-    }
-  }
-
-  // `pub fn Server(comptime H: type) type { return struct { … }; }` is how Zig
-  // spells a generic type, and the returned container's fields and methods
-  // are that type's whole API. The statement walk above sees only a `return`,
-  // so materialize the container under returns__<kind>/ like a named struct.
-  materializeZigReturnedType(body, symQuarkPath, relPath) {
-    // Locate and match braces on a masked copy (same length, literals and
-    // comments blanked) so a `}` in `"}"` or a `return struct {` in a comment
-    // does not move the container's bounds; slice the real text afterwards.
-    const code = maskZigNonCode(body);
-    const open = code.indexOf('{');
-    if (open < 0 || !/\)\s*type\s*$/.test(code.slice(0, open))) return;
-    const ret = /\breturn\s+(?:extern\s+|packed\s+)?(struct|union|enum|opaque)\b[^{;]*\{/.exec(code.slice(open + 1));
-    if (!ret) return;
-    const start = open + ret.index + ret[0].length; // the container's `{`
-    let close = -1;
-    for (let i = start, depth = 0; i < code.length; i++) {
-      if (code[i] === '{') depth++;
-      else if (code[i] === '}' && --depth === 0) { close = i; break; }
-    }
-    if (close < 0) return;
-    const inner = body.slice(start + 1, close);
-    const dir = path.join(symQuarkPath, `returns__${ret[1]}`);
-    mkdirSync(dir);
-    this.emitFieldFolders(dir, parseZigStructFields(inner));
-    this.processCStyle(inner, inner.split('\n'), '.zig', dir, relPath);
-  }
-
   quarkifyBodyFlat(body, parentPath) {
     const cleanBody = body.replace(/\/\/.*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
     const statements = cleanBody.split(/(;|\{|\})/);
@@ -1964,6 +1927,43 @@ class QuarkFolderEngine {
         }
       }
     }
+  }
+
+  emitFieldFolders(parentPath, fields) {
+    for (const f of fields) {
+      const fDir = path.join(parentPath, `field__${safeName(f.name)}`);
+      mkdirSync(fDir);
+      if (f.type) mkdirSync(path.join(fDir, `type__${safeName(f.type).substring(0, 60)}`));
+      if (f.default) mkdirSync(path.join(fDir, `default__${safeLiteralName(f.default, f.name).substring(0, 60)}`));
+      else mkdirSync(path.join(fDir, `default__missing__uninit_hazard`));
+    }
+  }
+
+  // `pub fn Server(comptime H: type) type { return struct { … }; }` is how Zig
+  // spells a generic type, and the returned container's fields and methods
+  // are that type's whole API. The statement walk above sees only a `return`,
+  // so materialize the container under returns__<kind>/ like a named struct.
+  materializeZigReturnedType(body, symQuarkPath, relPath) {
+    // Locate and match braces on a masked copy (same length, literals and
+    // comments blanked) so a `}` in `"}"` or a `return struct {` in a comment
+    // does not move the container's bounds; slice the real text afterwards.
+    const code = maskZigNonCode(body);
+    const open = code.indexOf('{');
+    if (open < 0 || !/\)\s*type\s*$/.test(code.slice(0, open))) return;
+    const ret = /\breturn\s+(?:extern\s+|packed\s+)?(struct|union|enum|opaque)\b[^{;]*\{/.exec(code.slice(open + 1));
+    if (!ret) return;
+    const start = open + ret.index + ret[0].length; // the container's `{`
+    let close = -1;
+    for (let i = start, depth = 0; i < code.length; i++) {
+      if (code[i] === '{') depth++;
+      else if (code[i] === '}' && --depth === 0) { close = i; break; }
+    }
+    if (close < 0) return;
+    const inner = body.slice(start + 1, close);
+    const dir = path.join(symQuarkPath, `returns__${ret[1]}`);
+    mkdirSync(dir);
+    this.emitFieldFolders(dir, parseZigStructFields(inner));
+    this.processCStyle(inner, inner.split('\n'), '.zig', dir, relPath);
   }
 
   // ─── Metal `.metal` (MSL: Metal Shading Language) ───
