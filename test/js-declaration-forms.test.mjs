@@ -166,3 +166,20 @@ test('typed, generic and multi-line arrow functions are materialized', async () 
     assert.deepEqual((await readdir(fileQuark)).sort(), ['fn__generic', 'fn__handler', 'fn__multiLine', 'fn__typed']);
   });
 });
+
+// A parenthesis inside a string or comment in the parameter list is text. When
+// it was counted, `(x = "(")` never balanced and the arrow disappeared — a
+// function main materializes, and --strict-coverage cannot see arrows.
+test('brackets inside strings and comments in arrow parameters are ignored', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOn(workspace, 'sample.js', [
+      'const f = (x = "(") => { return consume(x); };',
+      "const g = (y = ')', /* ( */ z = `(`) => { return y + z; };",
+      'function after() { return 1; }',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual((await readdir(fileQuark)).sort(), ['fn__after', 'fn__f', 'fn__g']);
+  });
+});

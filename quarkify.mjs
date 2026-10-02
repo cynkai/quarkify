@@ -239,10 +239,20 @@ function jsArrowFollows(lines, i, rhs) {
   for (let j = i + 1; j < Math.min(lines.length, i + 30) && text.length < 2000; j++) text += `\n${lines[j]}`;
   let p = 0;
   const skipWs = () => { while (p < text.length && /\s/.test(text[p])) p++; };
+  // A delimiter inside a string or comment is text: `(x = "(") =>` would
+  // otherwise never balance and the arrow would be lost.
   const skipBalanced = (open, close) => {
     for (let depth = 0; p < text.length; p++) {
-      if (text[p] === open) depth++;
-      else if (text[p] === close && --depth === 0) { p++; return; }
+      const c = text[p];
+      if (c === '"' || c === "'" || c === '`') {
+        for (p++; p < text.length && text[p] !== c; p++) if (text[p] === '\\') p++;
+      } else if (c === '/' && text[p + 1] === '/') {
+        while (p < text.length && text[p] !== '\n') p++;
+      } else if (c === '/' && text[p + 1] === '*') {
+        const end = text.indexOf('*/', p + 2);
+        p = end < 0 ? text.length : end + 1;
+      } else if (c === open) depth++;
+      else if (c === close && --depth === 0) { p++; return; }
     }
   };
   skipWs();
