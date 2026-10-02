@@ -2236,10 +2236,23 @@ class QuarkFolderEngine {
       const src = masked.slice(spec.start, spec.end).join('\n').trim();
       let m;
       if ((m = src.match(/^(type|var|const)\s*\(/))) {
-        // Grouped declaration: its specs sit between the `(` line and the `)` line.
-        for (const inner of splitGoSpecs(masked, spec.start + 1, spec.end - 1)) {
-          const innerSrc = masked.slice(inner.start, inner.end).join('\n').trim();
-          if (innerSrc && innerSrc !== ')') emitSpec(m[1], innerSrc);
+        // Grouped declaration: its specs are the text between the group's own
+        // parentheses — not the lines between them, since Go allows specs on
+        // the `(` and `)` lines too, down to `var ( a = 1; b = 2 )` on one line.
+        // Within that text a spec ends at a newline (where Go inserts the
+        // semicolon) or at an explicit top-level `;`.
+        const open = m[0].length - 1;
+        let close = open;
+        for (let depth = 0; close < src.length; close++) {
+          if (src[close] === '(') depth++;
+          else if (src[close] === ')' && --depth === 0) break;
+        }
+        const interior = src.slice(open + 1, close).split('\n');
+        for (const inner of splitGoSpecs(interior, 0, interior.length)) {
+          const innerSrc = interior.slice(inner.start, inner.end).join('\n');
+          for (const part of splitGoTopLevel(innerSrc, ';')) {
+            if (part) emitSpec(m[1], part);
+          }
         }
       } else if ((m = src.match(/^(type|var|const)\s+/))) {
         emitSpec(m[1], src.slice(m[0].length));

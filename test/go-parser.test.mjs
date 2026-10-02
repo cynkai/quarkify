@@ -290,6 +290,37 @@ test('grouped and single-line declarations each get their own node', async () =>
   });
 });
 
+// Go allows specs on a group's `(` and `)` lines, and `;` between specs on one
+// line. Reading only the lines strictly between them dropped `var ( a = 1; b = 2 )`
+// entirely, and the first/last spec of a group that shares its delimiter lines.
+// The coverage scan covers functions only, so --strict-coverage passed anyway.
+test('specs on a group\'s delimiter lines and after `;` are not dropped', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnGo(workspace, [
+      'package p',
+      'var ( a = 1; b = 2 )',
+      'const (Alpha = 1',
+      '\tBeta = 2',
+      '\tGamma = 3)',
+      'type ( ID string; Name = ID )',
+      'func f() {}',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(await topLevel(fileQuark), [
+      'const__Alpha', 'const__Beta', 'const__Gamma',
+      'fn__f',
+      'type__ID', 'type__Name',
+      'var__a', 'var__b',
+    ]);
+    const entries = await listRelativeEntries(fileQuark);
+    for (const expected of ['var__a/default__1', 'var__b/default__2', 'const__Gamma/default__3', 'type__Name/alias__ID']) {
+      assert.ok(entries.includes(expected), `${expected} missing:\n${entries.join('\n')}`);
+    }
+  });
+});
+
 // There is no `;` to end a Go declaration. A single-line var that waited for
 // one would swallow every declaration after it.
 test('a single-line var or const does not swallow the next function', async () => {
