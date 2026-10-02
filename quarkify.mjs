@@ -1745,12 +1745,8 @@ class QuarkFolderEngine {
           emitStmtList(stmts, symQuarkPath);
         }
       } else {
-        // A function's text starts with its own signature, and splitting that
-        // into statements read `add(int a, int b)` as a call: every function
-        // listed itself under call__<own name>, so `fd call__add` returned the
-        // definition as one of add's callers. Only the body is statements.
-        const inner = FUNCTION_LIKE_KINDS.has(cur.kind) ? functionBodyBlock(body) : null;
-        this.quarkifyBodyFlat(inner ?? body, symQuarkPath);
+        const declaredName = FUNCTION_LIKE_KINDS.has(cur.kind) ? (cur.callName || cur.name) : null;
+        this.quarkifyBodyFlat(body, symQuarkPath, declaredName);
       }
 
       this.registerMirror(cur.kind, cur.role, relPath, path.relative(this.quarkDir, symQuarkPath));
@@ -1769,7 +1765,7 @@ class QuarkFolderEngine {
         }
       }
       if (!cur) {
-        let m, name, kind, role;
+        let m, name, kind, role, callName;
         if (ext === '.zig') {
           if ((m = line.match(/^\s*(?:pub\s+)?(?:export\s+|extern\s+(?:\"[^\"]*\"\s+)?|noinline\s+|inline\s+)?fn\s+([a-zA-Z0-9_]+)\s*\(/))) {
             name = m[1]; kind = 'fn'; role = guessRole(name);
@@ -1796,7 +1792,7 @@ class QuarkFolderEngine {
           const trimmed = line.trim();
           if (trimmed.startsWith('#') || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.length === 0) {
           } else if ((m = line.match(/([a-zA-Z_][a-zA-Z0-9_]*)::([a-zA-Z_~][a-zA-Z0-9_]*)\s*\([^;]*$/)) && !line.match(/^\s*\/\//) && !line.match(/\breturn\b/) && line.indexOf('=') === -1) {
-            name = `${m[1]}__${m[2]}`; kind = 'method'; role = guessRole(m[2]);
+            name = `${m[1]}__${m[2]}`; callName = m[2]; kind = 'method'; role = guessRole(m[2]);
           } else if ((m = line.match(/^\s*(?:static\s+|inline\s+|virtual\s+|constexpr\s+|extern\s+(?:"C"\s+)?|template\s*<[^>]*>\s*)*[\w:<>,\s\*&]+?\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^;]*$/)) && !line.includes('=') && !line.match(/\breturn\b/) && !line.match(/^\s*(?:if|while|for|switch|return)\b/)) {
             name = m[1]; kind = 'fn'; role = guessRole(name);
           } else if ((m = line.match(/^\s*(?:template\s*<[^>]*>\s*)?(?:class|struct)\s+(?:[A-Z_]+\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(?::[^{]*)?\s*\{/))) {
@@ -1830,7 +1826,7 @@ class QuarkFolderEngine {
           }
         }
         if (name) {
-          cur = { name, kind, role };
+          cur = { name, kind, role, callName };
           cur.annotations = pendingAnnotations;
           pendingAnnotations = [];
           symStart = i;
@@ -1849,13 +1845,22 @@ class QuarkFolderEngine {
     finishSymbol(lines.length);
   }
 
-  quarkifyBodyFlat(body, parentPath) {
+  // `declaredName`: for a function, its text starts with its own signature,
+  // which splits into the first statement. There `add(int a, int b)` reads as
+  // a call, so every function listed itself under call__<own name> and
+  // `fd call__add` returned the definition as one of add's callers. Only that
+  // one occurrence is skipped: a default argument (`x = make()`) is a real
+  // call, and so is recursion.
+  quarkifyBodyFlat(body, parentPath, declaredName = null) {
     const cleanBody = body.replace(/\/\/.*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
     const statements = cleanBody.split(/(;|\{|\})/);
     let stmtIndex = 0;
+    let selfName = declaredName;
     for (let stmt of statements) {
       stmt = stmt.trim();
       if (!stmt || stmt === ';' || stmt === '{' || stmt === '}') continue;
+      const signatureName = selfName;
+      selfName = null;
       let stmtName = '';
       const children = [];
       if (stmt.startsWith('if ') || stmt.startsWith('if(')) {
@@ -1876,8 +1881,12 @@ class QuarkFolderEngine {
         if (stmt.includes('cp.async')) children.push('inline_asm__cp_async');
       } else stmtName = `stmt_${stmtIndex++}`;
       const callMatches = stmt.matchAll(/\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g);
+      // The declaration is the name whose `(` opens the statement's first
+      // parenthesis; in `const f = () => f()` the `f()` is a real call.
+      const firstParen = stmt.indexOf('(');
       for (const m of callMatches) {
         const callName = m[1];
+        if (callName === signatureName && m.index + m[0].length - 1 === firstParen) continue;
         if (!/^(if|while|for|switch|return|try|catch|orelse|defer|errdefer|comptime|sizeof|static_cast|reinterpret_cast)$/.test(callName)) {
           children.push(`call__${callName}`);
         }
@@ -2744,37 +2753,6 @@ function escapeHtml(value) {
 }
 
 const FUNCTION_LIKE_KINDS = new Set(['fn', 'method', 'kernel', 'device_fn', 'host_fn']);
-
-// The inside of the brace block that ends a function's text, or null when the
-// text does not end with one (`const f = () => x;`, `=> ({ … })`). The block is
-// the last top-level one, so a `{` in the parameters (`function f({ a } = {})`)
-// or a C++ member initializer (`: a{1}`) is not mistaken for it. Strings and
-// comments are skipped so a brace inside a literal is not counted.
-function functionBodyBlock(text) {
-  const stack = [];
-  let block = null;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"' || c === "'" || c === '`') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== c && (c === '`' || text[j] !== '\n')) j += text[j] === '\\' ? 2 : 1;
-      i = j;
-    } else if (c === '/' && text[i + 1] === '/') {
-      const end = text.indexOf('\n', i);
-      i = end < 0 ? text.length : end;
-    } else if (c === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
-      i = end < 0 ? text.length : end + 1;
-    } else if (c === '{') {
-      stack.push(i);
-    } else if (c === '}' && stack.length) {
-      const open = stack.pop();
-      if (!stack.length) block = [open, i];
-    }
-  }
-  if (!block || !/^[\s;]*$/.test(text.slice(block[1] + 1))) return null;
-  return text.slice(block[0] + 1, block[1]);
-}
 
 function splitParamsTopLevel(text) {
   // depth-aware comma split (Metal params 의 [[ ]] 안 콤마는 무시 - ignores commas inside [[ ]] of Metal params)

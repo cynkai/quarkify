@@ -89,7 +89,7 @@ test('a JS function does not list itself as a call, but recursion still shows', 
       '  return n ? n * fact(n - 1) : 1;',
       '}',
       '',
-      // Braces in the parameter list are not the body.
+      // Braces in the parameter list split the signature into pieces.
       'function pick({ a } = {}) {',
       '  return lookup(a);',
       '}',
@@ -105,8 +105,8 @@ test('a JS function does not list itself as a call, but recursion still shows', 
   });
 });
 
-// Without a brace body there is no signature/body split to make, so the
-// expression is handled exactly as before.
+// An arrow function's name is not followed by `(`, so there is no declaration
+// to skip and its calls are handled exactly as before.
 test('an expression-bodied arrow function keeps its calls', async () => {
   await withTempWorkspace(async (workspace) => {
     const { result, fileQuark } = await runOnSource(workspace, 'sample.js', [
@@ -117,5 +117,52 @@ test('an expression-bodied arrow function keeps its calls', async () => {
     assert.equal(result.status, 0, result.stderr);
     const entries = await listRelativeEntries(fileQuark);
     assert.deepEqual(callsUnder(entries, 'fn__double'), ['twice'], entries.join('\n'));
+  });
+});
+
+// A default argument is evaluated whenever the caller omits it, so `make` is
+// called by `f` and must stay a call — only `f` itself is not one.
+test('a call in a default parameter stays, the declared name does not', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnSource(workspace, 'sample.js', [
+      'function f(x = make()) {',
+      '  return x;',
+      '}',
+      '',
+    ].join('\n'));
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(fileQuark);
+    assert.deepEqual(callsUnder(entries, 'fn__f'), ['make'], entries.join('\n'));
+  });
+});
+
+test('a C++ method does not list itself as a call', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnSource(workspace, 'sample.cpp', [
+      'int Counter::next(int step) {',
+      '    return bump(step);',
+      '}',
+      '',
+    ].join('\n'));
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(fileQuark);
+    assert.deepEqual(callsUnder(entries, 'method__Counter__next'), ['bump'], entries.join('\n'));
+  });
+});
+
+// An expression-bodied arrow has no `name(` declaration, so a call to its own
+// name in that first statement is recursion and stays.
+test('recursion in an expression-bodied arrow is still a call', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnSource(workspace, 'sample.js', [
+      'const countdown = (n) => n && countdown(n - 1);',
+      '',
+    ].join('\n'));
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(fileQuark);
+    assert.deepEqual(callsUnder(entries, 'fn__countdown'), ['countdown'], entries.join('\n'));
   });
 });
