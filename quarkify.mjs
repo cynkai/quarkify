@@ -245,6 +245,23 @@ function classifyPtxArg(raw, opcode) {
   return { kind: 'other', value: r, type: '' };
 }
 
+// Only a container's own declarations are fields. A statement inside a method
+// body has the same `<word> <word>;` / `<word> = ...;` shape, so `return null;`
+// surfaced as a Java field `null` of type `return`, and `continue;` or
+// `acc = acc + n;` as JS/TS fields. Yield the lines that start at brace depth 0.
+function containerLevelLines(body) {
+  const out = [];
+  let depth = 0;
+  for (const raw of body.split('\n')) {
+    if (depth === 0) out.push(raw);
+    const code = raw
+      .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g, '""')
+      .replace(/\/\/.*/, '');
+    depth = Math.max(0, depth + (code.match(/\{/g) || []).length - (code.match(/\}/g) || []).length);
+  }
+  return out;
+}
+
 // ─── Zig struct 필드 파서 (Zig Struct Field Parser) ───
 function parseZigStructFields(body) {
   const fields = [];
@@ -263,8 +280,7 @@ function parseZigStructFields(body) {
 // ─── Java class/interface 필드 파서 (Java Class/Interface Field Parser) ───
 function parseJavaFields(body) {
   const fields = [];
-  const lines = body.split('\n');
-  for (const raw of lines) {
+  for (const raw of containerLevelLines(body)) {
     let l = raw.replace(/\/\/.*/g, '').trim();
     if (!l || l.includes('(') || l.includes(')') || l.startsWith('class ') || l.startsWith('interface ') || l.startsWith('public class ')) continue;
     const m = l.match(/^\s*(?:public\s+|protected\s+|private\s+|static\s+|final\s+|transient\s+|volatile\s+)*([a-zA-Z0-9_<>\[\]]+)\s+([a-zA-Z0-9_]+)\s*(?:=\s*([^;]+))?;\s*$/);
@@ -277,8 +293,7 @@ function parseJavaFields(body) {
 // ─── JS/TS class/interface 필드 파서 (JS/TS Class/Interface Field Parser) ───
 function parseJSFields(body) {
   const fields = [];
-  const lines = body.split('\n');
-  for (const raw of lines) {
+  for (const raw of containerLevelLines(body)) {
     let l = raw.replace(/\/\/.*/g, '').trim();
     if (!l || l.includes('(') || l.includes(')') || l.startsWith('class ') || l.startsWith('interface ') || l.startsWith('export class ') || l.startsWith('export interface ')) continue;
     // JS/TS 프로퍼티 정규식 (JS/TS Property Regex)
