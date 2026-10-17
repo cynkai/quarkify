@@ -2740,12 +2740,21 @@ function escapeHtml(value) {
 
 function splitParamsTopLevel(text) {
   // depth-aware comma split (Metal params 의 [[ ]] 안 콤마는 무시 - ignores commas inside [[ ]] of Metal params)
+  // 문자열 리터럴과 {} 안의 콤마도 무시하고, `->` / `=>` 의 `>` 는 닫는 괄호로 세지 않는다.
+  // (Commas inside string literals and {} are ignored too, and the `>` of `->` / `=>` is not a closing bracket.)
   const out = [];
-  let depth = 0, start = 0;
+  let depth = 0, start = 0, quote = null;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (c === '(' || c === '[' || c === '<') depth++;
-    else if (c === ')' || c === ']' || c === '>') depth--;
+    if (quote) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+    else if (c === '>' && (text[i - 1] === '-' || text[i - 1] === '=')) continue;
+    else if (c === '(' || c === '[' || c === '{' || c === '<') depth++;
+    else if (c === ')' || c === ']' || c === '}' || c === '>') depth--;
     else if (c === ',' && depth === 0) {
       out.push(text.substring(start, i));
       start = i + 1;
