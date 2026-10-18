@@ -2779,8 +2779,9 @@ function matchGlobPattern(relPath, pattern) {
 
   const segmentMatches = (segment, relSegment) => {
     const escaped = segment
-      .replace(/[|\\{}()[\]^$+?.]/g, '\\$&')
-      .replace(/\*/g, '[^/]*');
+      .replace(/[|\\{}()[\]^$+.]/g, '\\$&')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\?/g, '[^/]');
     return new RegExp(`^${escaped}$`).test(relSegment);
   };
 
@@ -2884,7 +2885,7 @@ async function main() {
 
   // Glob 파일 스캔 및 매핑 (Glob File Scan and Mapping)
   let resolvedFiles = [];
-  const hasGlob = CONFIG.sourceFiles.some(f => f.includes('*'));
+  const hasGlob = CONFIG.sourceFiles.some(f => f.includes('*') || f.includes('?'));
   if (hasGlob) {
     console.log('🔍 Glob 패턴 감지됨. 소스 디렉터리 스캔 중...');
     const allFiles = getFilesRecursively(CONFIG.srcDir);
