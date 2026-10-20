@@ -491,3 +491,31 @@ test('explicit sourceFiles cannot escape srcDir through a symlink', async (t) =>
     assert.match(result.stderr || result.stdout, /outside srcDir/i);
   });
 });
+
+test('a glob scan skips an outDir nested inside srcDir', async () => {
+  await withTempWorkspace(async (tmp) => {
+    const srcDir = path.join(tmp, 'src');
+    const outDir = path.join(srcDir, 'quark_out');
+    const configPath = path.join(tmp, 'config.mjs');
+
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(path.join(srcDir, 'sample.js'), 'export function sampleThing() { return 1; }\n', 'utf8');
+    await writeConfig(configPath, `{
+      name: 'nested-outdir-glob-regression',
+      srcDir: ${JSON.stringify(srcDir)},
+      outDir: ${JSON.stringify(outDir)},
+      sourceFiles: ['**/*'],
+      perfData: {},
+      guessRole() { return 'general'; },
+    }`);
+
+    const first = runQuarkify(configPath, ['--allow-executable-config']);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    assert.ok(existsSync(path.join(outDir, 'index.html')));
+
+    const second = runQuarkify(configPath, ['--allow-executable-config']);
+    assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.match(second.stdout, /총 1개 파일 매칭됨/);
+    assert.doesNotMatch(second.stdout, /분해 중: quark_out/);
+  });
+});

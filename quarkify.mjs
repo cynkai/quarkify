@@ -2888,8 +2888,11 @@ async function main() {
   if (hasGlob) {
     console.log('🔍 Glob 패턴 감지됨. 소스 디렉터리 스캔 중...');
     const allFiles = getFilesRecursively(CONFIG.srcDir);
+    // An outDir nested in srcDir holds the previous run's output; never read it back as source.
+    const outReal = fs.existsSync(CONFIG.outDir) ? fs.realpathSync(CONFIG.outDir) : CONFIG.outDir;
     for (const fileAbs of allFiles) {
       const fileRel = path.relative(CONFIG.srcDir, fileAbs);
+      if (isInsideDir(outReal, path.join(srcRoot, fileRel))) continue;
       const isMatched = CONFIG.sourceFiles.some(pat => matchGlobPattern(fileRel, pat));
       if (isMatched) {
         validateSourceFilePath(srcRoot, fileRel);
