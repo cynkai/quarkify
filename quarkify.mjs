@@ -158,6 +158,17 @@ function shouldRedactLiteral(value, key = '') {
   if (/https?:\/\/[^/\s:@]+:[^/\s@]+@/i.test(raw)) return true;
   return false;
 }
+// safeName() stops at 100 characters, so two long names that share a prefix
+// come out identical. Mirror and axon entries are named after a whole quark
+// path, and a long file path pushes every symbol in that file past the cut,
+// collapsing them into one entry. Names that could be cut keep a digest of the
+// full name so each one stays distinct; short names come out as before.
+function safeUniqueName(name) {
+  const flat = safeName(name);
+  if (Buffer.byteLength(String(name)) <= 100) return flat;
+  const digest = createHash('sha1').update(String(name)).digest('hex').slice(0, 8);
+  return `${flat.substring(0, 90)}__${digest}`;
+}
 function mkdirSync(d) { fs.mkdirSync(d, { recursive: true }); }
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
 function perfBand(pct) {
@@ -2310,7 +2321,7 @@ class QuarkFolderEngine {
     this.mirrors.by_kind[kind].push(relPath);
     if (!this.mirrors.by_role[role]) this.mirrors.by_role[role] = [];
     this.mirrors.by_role[role].push(relPath);
-    const fileKey = safeName(file);
+    const fileKey = safeUniqueName(file);
     if (!this.mirrors.by_file[fileKey]) this.mirrors.by_file[fileKey] = [];
     this.mirrors.by_file[fileKey].push(relPath);
     if (!this.mirrors.by_depth['depth_1']) this.mirrors.by_depth['depth_1'] = [];
@@ -2327,10 +2338,10 @@ class QuarkFolderEngine {
       const categoryDir = path.join(this.mirrorDir, category);
       mkdirSync(categoryDir);
       for (const [key, paths] of Object.entries(entries)) {
-        const keyDir = path.join(categoryDir, safeName(key));
+        const keyDir = path.join(categoryDir, safeUniqueName(key));
         mkdirSync(keyDir);
         for (const relPath of paths) {
-          const entryDir = path.join(keyDir, safeName(relPath));
+          const entryDir = path.join(keyDir, safeUniqueName(relPath));
           mkdirSync(entryDir);
           this.axons.push({ quark: relPath, mirror: path.relative(this.outputDir, entryDir), category, key });
         }
@@ -2341,14 +2352,14 @@ class QuarkFolderEngine {
   buildAxons() {
     const axonIndex = {};
     for (const axon of this.axons) {
-      const quarkKey = safeName(axon.quark);
+      const quarkKey = safeUniqueName(axon.quark);
       if (!axonIndex[quarkKey]) axonIndex[quarkKey] = [];
       axonIndex[quarkKey].push({ category: axon.category, key: axon.key });
     }
     for (const [quarkKey, connections] of Object.entries(axonIndex)) {
       const axonEntryDir = path.join(this.axonDir, quarkKey);
       mkdirSync(axonEntryDir);
-      for (const conn of connections) mkdirSync(path.join(axonEntryDir, `${conn.category}__${safeName(conn.key)}`));
+      for (const conn of connections) mkdirSync(path.join(axonEntryDir, `${conn.category}__${safeUniqueName(conn.key)}`));
     }
     const byOpcodeDir = path.join(this.axonDir, 'by_opcode');
     mkdirSync(byOpcodeDir);

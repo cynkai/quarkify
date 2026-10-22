@@ -491,3 +491,36 @@ test('explicit sourceFiles cannot escape srcDir through a symlink', async (t) =>
     assert.match(result.stderr || result.stdout, /outside srcDir/i);
   });
 });
+
+test('symbols in a file with a long path keep separate mirror and axon entries', async () => {
+  await withTempWorkspace(async (tmp) => {
+    const srcDir = path.join(tmp, 'src');
+    const outDir = path.join(tmp, 'out');
+    const configPath = path.join(tmp, 'config.json');
+    const relDir = 'main/java/com/example/product/platform/billing/settlement/reconciliation/service/impl';
+    const relFile = `${relDir}/SettlementReconciliationServiceImpl.js`;
+
+    await mkdir(path.join(srcDir, relDir), { recursive: true });
+    await writeFile(
+      path.join(srcDir, relFile),
+      'export function reconcileFirst() { return 1; }\nexport function reconcileSecond() { return 2; }\n',
+      'utf8',
+    );
+    await writeFile(configPath, JSON.stringify({
+      name: 'long-path-test',
+      srcDir,
+      outDir,
+      sourceFiles: [relFile],
+    }), 'utf8');
+
+    const result = runQuarkify(configPath);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal((await readdir(path.join(outDir, '_mirror', 'by_kind', 'fn'))).length, 2);
+    const [fileKey, ...rest] = await readdir(path.join(outDir, '_mirror', 'by_file'));
+    assert.equal(rest.length, 0);
+    assert.equal((await readdir(path.join(outDir, '_mirror', 'by_file', fileKey))).length, 2);
+    const axonEntries = (await readdir(path.join(outDir, '_axon'))).filter((name) => name !== 'by_opcode');
+    assert.equal(axonEntries.length, 2);
+  });
+});
