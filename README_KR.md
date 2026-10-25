@@ -157,6 +157,12 @@ node quarkify.mjs configs/spring_analysis.json
 node quarkify.mjs --allow-executable-config configs/spring_analysis.mjs
 ```
 
+실행이 끝나면 쿼크 트리를 소스의 단순 스캔 결과와 비교한 심볼 커버리지 한 줄이 출력되고, 파서가 놓친 심볼이 있으면 그 목록도 함께 출력됩니다. CI 등에서 누락이 있을 때 실행을 실패(종료 코드 1)로 처리하려면 `--strict-coverage` 를 추가합니다.
+
+```bash
+node quarkify.mjs --strict-coverage configs/spring_analysis.json
+```
+
 ---
 
 ## 🔍 CLI 탐색 예시 (Everything is a folder의 가치)

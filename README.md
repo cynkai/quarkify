@@ -198,6 +198,12 @@ For trusted executable configs, opt in explicitly:
 node quarkify.mjs --allow-executable-config configs/spring_analysis.mjs
 ```
 
+Every run ends with a symbol coverage line that compares the quark tree against a naive scan of the sources, and lists any symbols the parsers missed. To make a gap fail the run (exit code 1), for example in CI, add `--strict-coverage`:
+
+```bash
+node quarkify.mjs --strict-coverage configs/spring_analysis.json
+```
+
 ---
 
 ## 🔍 CLI Exploration Examples (The Value of "Everything is a folder")
