@@ -447,3 +447,27 @@ test('operator methods get their own folders and keep later methods at class lev
     ]);
   });
 });
+
+test('the backtick method is read as a method, not as an open command string', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnRuby(workspace, [
+      'class Shell',
+      '  alias_method :run_raw, :`',
+      '',
+      '  def `(cmd) = system(cmd)',
+      '',
+      '  def run(cmd)',
+      '    `ls #{cmd}`',
+      '  end',
+      'end',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /2\/2 \(100\.0%\)/);
+    const methods = (await readdir(path.join(fileQuark, 'class__Shell')))
+      .filter((name) => name.startsWith('fn__'))
+      .sort();
+    assert.deepEqual(methods, ['fn__op_backtick', 'fn__run']);
+  });
+});

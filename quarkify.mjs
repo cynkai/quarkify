@@ -981,7 +981,7 @@ const RUBY_OPERATOR_FOLDER_NAMES = {
   '<=': 'op_le', '>=': 'op_ge', '**': 'op_pow', '+@': 'op_uplus',
   '-@': 'op_uminus', '~@': 'op_tilde', '+': 'op_plus', '-': 'op_minus',
   '*': 'op_mul', '/': 'op_div', '%': 'op_mod', '&': 'op_and', '|': 'op_or',
-  '^': 'op_xor', '<': 'op_lt', '>': 'op_gt', '~': 'op_tilde',
+  '^': 'op_xor', '<': 'op_lt', '>': 'op_gt', '~': 'op_tilde', '`': 'op_backtick',
 };
 // Longest spelling first, so `<=>` is not read as `<=` followed by `>`.
 const RUBY_OPERATOR_METHOD = Object.keys(RUBY_OPERATOR_FOLDER_NAMES)
@@ -1020,6 +1020,10 @@ function stripRubyInline(line) {
       continue;
     }
     if (c === '#') break;
+    // A backtick that names the method (`def `(cmd)`, Kernel#` overridden) or
+    // a symbol (`:``) opens no command string. A label's colon (`{a:`ls`}`)
+    // follows an identifier, so it still does.
+    if (c === '`' && (/^\s*def\s+(?:self\.)?$/.test(out) || /(?:^|[\s(,[{=]):$/.test(out))) { out += c; continue; }
     if (c === '"' || c === "'" || c === '`') { quote = c; out += c; continue; }
     out += c;
   }
@@ -1438,7 +1442,7 @@ class QuarkFolderEngine {
     '.mjs': /\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
     '.cjs': /\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
     '.ts': /\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
-    '.rb': /^[ \t]*def\s+(?:self\.)?([A-Za-z_][A-Za-z0-9_]*[?!=]?|\[\]=?|[-+!~]@|[<=>!~*\/%&|^+-]+)/gm,
+    '.rb': /^[ \t]*def\s+(?:self\.)?([A-Za-z_][A-Za-z0-9_]*[?!=]?|\[\]=?|[-+!~]@|[<=>!~*\/%&|^+-]+|`)/gm,
   };
 
   // A language whose method names carry characters safeName() flattens must
