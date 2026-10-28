@@ -95,7 +95,7 @@ test('real comments and string bodies are still not counted', async () => {
 
 // A docstring is a string, so a `def` written inside one is text. It was
 // counted before because only single-line quotes were stripped.
-test('Zig multiline string lines are text, and Zig has no block comments', async () => {
+test('Zig multiline string lines are text', async () => {
   await withTempWorkspace(async (workspace) => {
     const result = await runOnSource(workspace, 'gen.zig', [
       'const template =',
@@ -110,7 +110,7 @@ test('Zig multiline string lines are text, and Zig has no block comments', async
     ].join('\n'));
 
     // Before: `generated` was expected (a false gap that failed the run), and
-    // the `/*` hid `real` and `after` from the audit.
+    // the `/*` in the string line hid `real` and `after` from the audit.
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /2\/2 \(100\.0%\)/);
   });
