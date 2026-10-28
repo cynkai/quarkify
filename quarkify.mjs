@@ -1432,10 +1432,14 @@ class QuarkFolderEngine {
 
   // Comment syntax of each scanned language. `#` is a comment only in Python
   // and Ruby: in JS it is a private field or part of a string ("#fff"), and
-  // `//` in Python is floor division. Anything not listed is C-style.
+  // `//` in Python is floor division. Zig has no block comments, and its `\\`
+  // starts a multiline-string line that runs to the newline: Zig code often
+  // carries source text that way (templates, tests), and a `fn` or `/*` in it
+  // is text. Anything not listed is C-style.
   static COMMENT_SYNTAX = {
     '.py': { line: ['#'], block: null, tripleQuotes: true },
     '.rb': { line: ['#'], block: null },
+    '.zig': { line: ['//'], block: null, lineString: '\\\\' },
   };
   static DEFAULT_COMMENT_SYNTAX = { line: ['//'], block: ['/*', '*/'] };
 
@@ -1464,7 +1468,8 @@ class QuarkFolderEngine {
         const stop = end < 0 ? n : end + syntax.block[1].length;
         out += ' ' + keepNewlines(text.slice(i, stop));
         i = stop;
-      } else if (syntax.line.some((marker) => text.startsWith(marker, i))) {
+      } else if (syntax.line.some((marker) => text.startsWith(marker, i)) ||
+                 (syntax.lineString && text.startsWith(syntax.lineString, i))) {
         const end = text.indexOf('\n', i);
         out += ' ';
         i = end < 0 ? n : end;

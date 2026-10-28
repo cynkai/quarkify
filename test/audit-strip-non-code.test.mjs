@@ -95,6 +95,27 @@ test('real comments and string bodies are still not counted', async () => {
 
 // A docstring is a string, so a `def` written inside one is text. It was
 // counted before because only single-line quotes were stripped.
+test('Zig multiline string lines are text, and Zig has no block comments', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const result = await runOnSource(workspace, 'gen.zig', [
+      'const template =',
+      '    \\\\pub fn generated(a: u32) u32 {',
+      '    \\\\    return a; /* not a comment in Zig',
+      ';',
+      '',
+      'pub fn real() void {}',
+      '',
+      'pub fn after() void {}',
+      '',
+    ].join('\n'));
+
+    // Before: `generated` was expected (a false gap that failed the run), and
+    // the `/*` hid `real` and `after` from the audit.
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /2\/2 \(100\.0%\)/);
+  });
+});
+
 test('a def inside a Python triple-quoted string is not counted', async () => {
   await withTempWorkspace(async (workspace) => {
     const result = await runOnSource(workspace, 'sample.py', [
