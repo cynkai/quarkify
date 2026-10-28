@@ -198,10 +198,10 @@ For trusted executable configs, opt in explicitly:
 node quarkify.mjs --allow-executable-config configs/spring_analysis.mjs
 ```
 
-Every run ends with a symbol coverage line that compares the quark tree against a naive scan of the sources, and lists any symbols the parsers missed. To make a gap fail the run (exit code 1), for example in CI, add `--strict-coverage`:
+For Zig, Python, JavaScript/TypeScript (`.js`, `.mjs`, `.cjs`, `.ts`) and Ruby files, the run summary also includes a symbol coverage line: a separate, simple scan finds the functions each file declares, and any the parsers missed are listed after the summary. Files in other languages, such as Java, are not checked yet. To make a gap fail the run (exit code 1), for example in CI, add `--strict-coverage`:
 
 ```bash
-node quarkify.mjs --strict-coverage configs/spring_analysis.json
+node quarkify.mjs --strict-coverage configs/python_analysis.json
 ```
 
 ---
