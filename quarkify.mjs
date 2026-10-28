@@ -249,15 +249,39 @@ function classifyPtxArg(raw, opcode) {
 // body has the same `<word> <word>;` / `<word> = ...;` shape, so `return null;`
 // surfaced as a Java field `null` of type `return`, and `continue;` or
 // `acc = acc + n;` as JS/TS fields. Yield the lines that start at brace depth 0.
+//
+// One left-to-right pass per line, so a brace inside a string, a char literal
+// or a comment is never counted; a `/* */` comment carries across lines. Block
+// comments come back blanked: a `{` in one no longer hides every later field,
+// and a commented-out declaration is not read as a field.
 function containerLevelLines(body) {
   const out = [];
   let depth = 0;
+  let inComment = false;
   for (const raw of body.split('\n')) {
-    if (depth === 0) out.push(raw);
-    const code = raw
-      .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g, '""')
-      .replace(/\/\/.*/, '');
-    depth = Math.max(0, depth + (code.match(/\{/g) || []).length - (code.match(/\}/g) || []).length);
+    const startDepth = depth;
+    let code = '';
+    for (let i = 0; i < raw.length; i++) {
+      const c = raw[i];
+      if (inComment) {
+        if (c === '*' && raw[i + 1] === '/') { inComment = false; code += '  '; i++; } else code += ' ';
+      } else if (c === '/' && raw[i + 1] === '*') {
+        inComment = true; code += '  '; i++;
+      } else if (c === '/' && raw[i + 1] === '/') {
+        code += raw.slice(i); // the field parsers drop line comments themselves
+        break;
+      } else if (c === '"' || c === "'" || c === '`') {
+        let j = i + 1;
+        while (j < raw.length && raw[j] !== c) j += raw[j] === '\\' ? 2 : 1;
+        code += raw.slice(i, j + 1);
+        i = j;
+      } else {
+        if (c === '{') depth++;
+        else if (c === '}') depth = Math.max(0, depth - 1);
+        code += c;
+      }
+    }
+    if (startDepth === 0) out.push(code);
   }
   return out;
 }

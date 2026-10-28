@@ -542,3 +542,44 @@ test('statements inside method bodies are not recorded as class fields', async (
     assert.deepEqual(await fieldsOf(path.join(outDir, 'quark', 'file__cart.ts', 'class__Cart')), ['field__total']);
   });
 });
+
+test('braces and declarations inside block comments do not change the class fields', async () => {
+  await withTempWorkspace(async (tmp) => {
+    const srcDir = path.join(tmp, 'src');
+    const outDir = path.join(tmp, 'out');
+    const configPath = path.join(tmp, 'config.json');
+
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(path.join(srcDir, 'Box.java'), [
+      'public class Box {',
+      '    /* legacy layout: { width, height } was split */',
+      '    private int width;',
+      '    /* opening brace { kept for old parsers */',
+      '    private int height;',
+      '    /*',
+      '    private int depth;',
+      '    */',
+      "    private char open = '{'; /* a { here too */",
+      '',
+      '    public int area() {',
+      '        return width * height;',
+      '    }',
+      '}',
+      '',
+    ].join('\n'), 'utf8');
+    await writeFile(configPath, JSON.stringify({
+      name: 'block-comment-fields',
+      srcDir,
+      outDir,
+      sourceFiles: ['Box.java'],
+    }), 'utf8');
+
+    const result = runQuarkify(configPath);
+
+    assert.equal(result.status, 0, result.stderr);
+    const fields = (await readdir(path.join(outDir, 'quark', 'file__Box.java', 'class__Box')))
+      .filter((name) => name.startsWith('field__'))
+      .sort();
+    assert.deepEqual(fields, ['field__height', 'field__open', 'field__width']);
+  });
+});
