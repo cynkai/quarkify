@@ -167,7 +167,16 @@ function safeUniqueName(name) {
   const flat = safeName(name);
   if (Buffer.byteLength(String(name)) <= 100) return flat;
   const digest = createHash('sha1').update(String(name)).digest('hex').slice(0, 8);
-  return `${flat.substring(0, 90)}__${digest}`;
+  // Cut by UTF-8 bytes and never inside a character, so the head stays a valid
+  // name whatever characters safeName() lets through.
+  let head = '';
+  let bytes = 0;
+  for (const ch of flat) {
+    bytes += Buffer.byteLength(ch);
+    if (bytes > 90) break;
+    head += ch;
+  }
+  return `${head}__${digest}`;
 }
 function mkdirSync(d) { fs.mkdirSync(d, { recursive: true }); }
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
@@ -2369,7 +2378,9 @@ class QuarkFolderEngine {
       const byEntry = {};
       for (const s of sites) { if (!byEntry[s.entry]) byEntry[s.entry] = []; byEntry[s.entry].push(s); }
       for (const [entry, entrySites] of Object.entries(byEntry)) {
-        mkdirSync(path.join(opDir, `entry__${safeName(entry)}__sites_${entrySites.length}`));
+        // PTX entry names are mangled C++: template instantiations of one kernel
+        // share long prefixes, and often the same site count.
+        mkdirSync(path.join(opDir, `entry__${safeUniqueName(entry)}__sites_${entrySites.length}`));
       }
     }
   }
