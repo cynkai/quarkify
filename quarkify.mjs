@@ -1450,10 +1450,12 @@ class QuarkFolderEngine {
   static NAIVE_SYMBOL_SCANS = {
     '.zig': /\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
     '.py': /^[ \t]*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm,
-    '.js': /\bfunction\b\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
-    '.mjs': /\bfunction\b\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
-    '.cjs': /\bfunction\b\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
-    '.ts': /\bfunction\b\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g,
+    // `[(<]`: a TypeScript generic declaration has its type parameters
+    // between the name and `(` (`function identity<T>(arg: T)`).
+    '.js': /\bfunction\b\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*[(<]/g,
+    '.mjs': /\bfunction\b\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*[(<]/g,
+    '.cjs': /\bfunction\b\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*[(<]/g,
+    '.ts': /\bfunction\b\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*[(<]/g,
     '.rb': /^[ \t]*def\s+(?:self\.)?([A-Za-z_][A-Za-z0-9_]*[?!=]?)/gm,
   };
 
@@ -1855,7 +1857,7 @@ class QuarkFolderEngine {
           if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*') || trimmed.length === 0 || trimmed.startsWith('import ') || trimmed.startsWith('export *')) {
           } else if ((m = line.match(/^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(class|interface)\s+([a-zA-Z0-9_]+)/))) {
             name = m[2]; kind = m[1]; role = 'type';
-          } else if ((m = line.match(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b\s*\*?\s*([a-zA-Z0-9_$]+)\s*\(/))) {
+          } else if ((m = line.match(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b\s*\*?\s*([a-zA-Z0-9_$]+)\s*[(<]/))) {
             name = m[1]; kind = 'fn'; role = guessRole(name);
           } else if ((m = line.match(/^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*(?::[^=]+)?=\s*(.*)$/)) &&
                      (/^(?:async\s+)?function\b/.test(m[2]) || jsArrowFollows(lines, i, m[2]))) {
@@ -1865,7 +1867,7 @@ class QuarkFolderEngine {
             // `View.prototype.render = function render(`, and chains like
             // `req.get = req.header = function header(`. A named function
             // expression keeps its own name; otherwise the property's.
-            const fnExpr = m[3].match(/^(?:async\s+)?function\b\s*\*?\s*([a-zA-Z0-9_$]*)\s*\(/);
+            const fnExpr = m[3].match(/^(?:async\s+)?function\b\s*\*?\s*([a-zA-Z0-9_$]*)\s*[(<]/);
             if (fnExpr || jsArrowFollows(lines, i, m[3])) {
               name = (fnExpr && fnExpr[1]) || m[2]; kind = 'fn'; role = guessRole(name);
             }

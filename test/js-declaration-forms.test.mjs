@@ -63,6 +63,36 @@ test('export default functions and classes are materialized', async () => {
   });
 });
 
+// A type parameter list sits between the name and `(`. Both the parser and the
+// audit's scan wanted the `(` right after the name, so a generic function
+// vanished from the tree while --strict-coverage reported 100%.
+test('generic function declarations are materialized and counted', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOn(workspace, 'util.ts', [
+      'export function identity<T>(arg: T): T {',
+      '  return arg;',
+      '}',
+      '',
+      'export async function fetchAll<K extends string, V>(keys: K[]): Promise<Map<K, V>> {',
+      '  return new Map();',
+      '}',
+      '',
+      'function* walk<T>(items: T[]) {',
+      '  yield* items;',
+      '}',
+      '',
+      'exports.pick = function <T>(xs: T[]): T {',
+      '  return xs[0];',
+      '};',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /3\/3 \(100\.0%\)/);
+    assert.deepEqual((await readdir(fileQuark)).sort(), ['fn__fetchAll', 'fn__identity', 'fn__pick', 'fn__walk']);
+  });
+});
+
 // Neither the parser nor the audit's scan knew `function*`, so a generator
 // vanished without a warning.
 test('generator functions are materialized and counted', async () => {
