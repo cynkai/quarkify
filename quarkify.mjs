@@ -2111,9 +2111,11 @@ class QuarkFolderEngine {
       const line = lines[i];
       // @interface NAME / @interface NAME (Category) / @implementation NAME / @protocol NAME
       let m;
-      if ((m = line.match(/^\s*@(interface|implementation|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\))?/))) {
-        // A forward `@protocol Name;` declares nothing to decompose.
-        if (m[1] === 'protocol' && /^\s*;/.test(line.slice(m.index + m[0].length))) continue;
+      // A generic class (`NSArray<ObjectType>`, bounds one level deep) may carry
+      // a category too; on a protocol, the `<…>` is the protocols it adopts.
+      if ((m = line.match(/^\s*@(interface|implementation|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*<(?:[^<>]|<[^<>]*>)*>)?(?:\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\))?/))) {
+        // A forward `@protocol Name;` / `@protocol A, B;` declares nothing to decompose.
+        if (m[1] === 'protocol' && /^\s*[;,]/.test(line.slice(m.index + m[0].length))) continue;
         const kind = `objc_${m[1]}`;
         const name = m[3] ? `${m[2]}+${m[3]}` : m[2];
         const role = guessRole(m[2]);

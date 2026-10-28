@@ -136,6 +136,36 @@ test('a class extension, a category and a forward protocol declaration', async (
   });
 });
 
+test('categories on generic classes and multi-name forward protocols', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnObjC(workspace, [
+      '@protocol Loader, Saver;',
+      '',
+      '@protocol Plugin <NSObject>',
+      '- (void)load;',
+      '@end',
+      '',
+      '@interface NSArray<ObjectType> (Functional)',
+      '- (NSArray *)mapWith:(id (^)(ObjectType obj))block;',
+      '@end',
+      '',
+      '@interface Box<__covariant ObjectType : id<NSCopying>> (Sorting)',
+      '- (void)sort;',
+      '@end',
+      '',
+    ].join('\n'));
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(fileQuark);
+    assert.ok(!entries.some((rel) => /^objc_protocol__(Loader|Saver)/.test(rel)), entries.join('\n'));
+    assert.deepEqual(methodFolders(entries).sort(), [
+      'objc_interface__Box_Sorting/objc_method__sort',
+      'objc_interface__NSArray_Functional/objc_method__mapWith_',
+      'objc_protocol__Plugin/objc_method__load',
+    ]);
+  });
+});
+
 test('wrapped selectors and block-typed parameters keep every keyword', async () => {
   await withTempWorkspace(async (workspace) => {
     const { result, fileQuark } = await runOnObjC(workspace, [
