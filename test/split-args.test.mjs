@@ -82,6 +82,52 @@ test('a Java annotation array literal stays one argument', async () => {
   });
 });
 
+test('a comparison in a decorator argument is not a bracket', async () => {
+  await withTempWorkspace(async (tmp) => {
+    const fileQuark = await runOn(tmp, 'sample.py', [
+      'import sys',
+      'import pytest',
+      '',
+      '@pytest.mark.skipif(sys.version_info > (3, 8), reason="old only")',
+      'def test_old():',
+      '    return 1',
+      '',
+      '@pytest.mark.skipif(sys.version_info < (3, 8), reason="new only")',
+      'def test_new():',
+      '    return 2',
+      '',
+    ].join('\n'));
+
+    for (const fn of ['fn__test_old', 'fn__test_new']) {
+      const args = await argFolders(path.join(fileQuark, fn, 'decorator__pytest.mark.skipif'));
+      assert.equal(args.length, 2, `${fn}: ${args.join(', ')}`);
+      assert.ok(args[0].startsWith('arg__0___sys.version_info'), `${fn}: ${args.join(', ')}`);
+      assert.ok(args[1].startsWith('arg__reason___'), `${fn}: ${args.join(', ')}`);
+    }
+  });
+});
+
+test('template arguments in a kernel parameter list still group their commas', async () => {
+  await withTempWorkspace(async (tmp) => {
+    const fileQuark = await runOn(tmp, 'blend.metal', [
+      '#include <metal_stdlib>',
+      'using namespace metal;',
+      '',
+      'kernel void blend(array<texture2d<float>, 2> layers [[texture(0)]],',
+      '                  device float * out [[buffer(0)]],',
+      '                  uint id [[thread_position_in_grid]]) {',
+      '    out[id] = 0;',
+      '}',
+      '',
+    ].join('\n'));
+
+    const params = (await readdir(path.join(fileQuark, 'metal_kernel__blend')))
+      .filter((name) => name.startsWith('param__'))
+      .sort();
+    assert.deepEqual(params, ['param__id', 'param__layers', 'param__out']);
+  });
+});
+
 test('a Ruby hash rocket does not stop later macro arguments from splitting', async () => {
   await withTempWorkspace(async (tmp) => {
     const fileQuark = await runOn(tmp, 'sample.rb', [
