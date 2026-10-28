@@ -52,3 +52,28 @@ test('a ? in a sourceFiles glob matches exactly one character', async () => {
     assert.ok(fileFolders.some((name) => name.includes('part2.js')));
   });
 });
+
+test('a ? matches one character even outside the BMP', async () => {
+  await withTempWorkspace(async (tmp) => {
+    const srcDir = path.join(tmp, 'src');
+    const outDir = path.join(tmp, 'out');
+    const configPath = path.join(tmp, 'config.json');
+
+    await mkdir(path.join(srcDir, 'lib'), { recursive: true });
+    // U+20000 is one character but two UTF-16 code units.
+    await writeFile(path.join(srcDir, 'lib', 'part\u{20000}.js'), 'export function partWide() { return 1; }\n', 'utf8');
+    await writeFile(path.join(srcDir, 'lib', 'partAB.js'), 'export function partTwoChars() { return 2; }\n', 'utf8');
+    await writeFile(configPath, JSON.stringify({
+      name: 'glob-question-mark-astral',
+      srcDir,
+      outDir,
+      sourceFiles: ['lib/part?.js'],
+    }), 'utf8');
+
+    const result = runQuarkify(configPath);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /총 1개 파일 매칭됨/);
+    assert.match(result.stdout, /분해 중: lib[\\/]part\u{20000}\.js/u);
+  });
+});

@@ -2782,7 +2782,9 @@ function matchGlobPattern(relPath, pattern) {
       .replace(/[|\\{}()[\]^$+.]/g, '\\$&')
       .replace(/\*/g, '[^/]*')
       .replace(/\?/g, '[^/]');
-    return new RegExp(`^${escaped}$`).test(relSegment);
+    // `u`: `?` is one character, including one outside the BMP (an emoji, a CJK
+    // extension ideograph) that takes two UTF-16 code units.
+    return new RegExp(`^${escaped}$`, 'u').test(relSegment);
   };
 
   const matchFrom = (patternIdx, relIdx) => {
