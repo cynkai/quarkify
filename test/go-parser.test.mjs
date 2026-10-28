@@ -436,6 +436,64 @@ test('declarations the parser loses are reported and fail --strict-coverage', as
   });
 });
 
+// A func literal can start a line (an argument on its own line). If it returns
+// a map or a generic type, `func() map[` looks like a declaration of `map`;
+// the parser rightly creates no such function, so the scan must not expect one.
+test('a func literal that starts a line is not expected as a declaration', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnGo(workspace, [
+      'package opt',
+      '',
+      'type Option[T any] struct{ v T }',
+      '',
+      'func Find[T any](items []T) Option[T] {',
+      '\tpick := apply(',
+      '\t\tfunc() Option[T] {',
+      '\t\t\treturn Option[T]{}',
+      '\t\t},',
+      '\t)',
+      '\tcounts := build(',
+      '\t\tfunc(n int) map[string]int {',
+      '\t\t\treturn nil',
+      '\t\t},',
+      '\t)',
+      '\t_, _ = pick, counts',
+      '\treturn Option[T]{}',
+      '}',
+      '',
+      'func (s *Store) Load(key string) int { return 0 }',
+      '',
+    ].join('\n'), ['--strict-coverage']);
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /2\/2 \(100\.0%\)/);
+    assert.deepEqual(await topLevel(fileQuark), ['fn__Find', 'fn__Store__Load', 'struct__Option']);
+  });
+});
+
+// A line that ends in a comparison or shift continues, like any other binary
+// operator: `ok := a >` and `b` are one statement.
+test('a statement broken after a comparison stays one statement', async () => {
+  await withTempWorkspace(async (workspace) => {
+    const { result, fileQuark } = await runOnGo(workspace, [
+      'package cmp',
+      '',
+      'func Big(a, b int) bool {',
+      '\tok := a >',
+      '\t\tb',
+      '\tmask := a <<',
+      '\t\t2',
+      '\treturn ok && mask > 0',
+      '}',
+      '',
+    ].join('\n'));
+
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await listRelativeEntries(path.join(fileQuark, 'fn__Big'));
+    assert.deepEqual(entries.filter((e) => !e.includes('/')), ['stmt_0__expr', 'stmt_1__expr', 'stmt_2__return']);
+  });
+});
+
 // A Go statement ends at a newline. Splitting bodies on `;{}` fused a line
 // into the `if` below it, so the `if` vanished and every `return` merged into
 // one folder.

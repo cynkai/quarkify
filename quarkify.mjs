@@ -1317,7 +1317,7 @@ function goBracketDelta(line) {
 // A line that closes back to depth 0 still continues onto the next one when it
 // ends in a binary operator or comma — the only places Go's automatic
 // semicolon insertion does not end a statement at the newline.
-const GO_CONTINUATION = /(?:[,+\-*/%&|^=.]|&&|\|\||<-)$/;
+const GO_CONTINUATION = /(?:[,+\-*/%&|^=.<>]|&&|\|\||<-)$/;
 function goContinues(text) {
   return GO_CONTINUATION.test(text) && !/(?:\+\+|--)$/.test(text); // `i++` ends a statement
 }
@@ -1881,7 +1881,10 @@ class QuarkFolderEngine {
     // or `[` — which is what separates a declaration from a func literal. The
     // name is any run of non-bracket characters, not an identifier pattern, so
     // a name the parser cannot read (Unicode, say) is reported, not skipped.
-    '.go': /^[ \t]*func\s*(\([^()]*\)\s*[^\s()[\]{}]+|[^\s()[\]{}]+)\s*[(\[]/gm,
+    // A method has a non-empty receiver and no type parameters, so it needs
+    // `(` after its name: otherwise a func literal that starts a line and
+    // returns `map[K]V` or `Option[T]` would read as a method named `map`.
+    '.go': /^[ \t]*func\s*(\([^()]*[^\s()][^()]*\)\s*[^\s()[\]{}]+(?=\s*\()|[^\s()[\]{}]+(?=\s*[(\[]))/gm,
   };
 
   // A language whose method names carry characters safeName() flattens must
